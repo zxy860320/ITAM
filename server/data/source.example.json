@@ -1,0 +1,6 @@
+{
+  "mode": "zabbix",
+  "endpoint": "http://your-zabbix-host:8080/api_jsonrpc.php",
+  "token": "your-zabbix-api-token",
+  "freq": 60
+}

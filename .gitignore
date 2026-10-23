@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.workbuddy/
+.ai-memory/
+output/
+*.log
+.DS_Store
+# 含真实 Zabbix API token，切勿入库（仓库保留 source.example.json 模板）
+server/data/source.json
