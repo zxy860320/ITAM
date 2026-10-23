@@ -1,5 +1,7 @@
 # IT运维监控平台（ITYW）
 
+> **后续 AI / 工程师接手请先读 [`docs/PRODUCT-HANDBOOK.md`](docs/PRODUCT-HANDBOOK.md)** —— 产品定位、API 一览、series 设计、Zabbix API 坑列表、文件地图与待办清单。
+
 基于 Zabbix 数据源的 IT 运维监控平台，复刻 7 张 Ardot 高保真设计稿（dark-monitoring-ops 设计系统）。
 
 ## 快速启动
