@@ -1,0 +1,106 @@
+/* TopoCanvas 样式（tc- 前缀避免与平台其他样式冲突；颜色跟随平台 tokens） */
+.tc-wrap { position: relative; min-width: 0; }
+.tc-svg { width: 100%; height: 640px; display: block; cursor: grab; background: var(--bg-inset, #101013); border: 1px solid var(--hairline); border-radius: 8px; }
+.tc-svg.panning { cursor: grabbing; }
+.tc-legend { position: absolute; right: 12px; top: 10px; background: rgba(20,20,23,.92); border: 1px solid var(--hairline); border-radius: 8px; padding: 9px 12px; font-size: 11px; color: var(--text-2); display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+.tc-legend .row { display: flex; gap: 8px; align-items: center; }
+.tc-swatch { width: 22px; height: 0; display: inline-block; border-top: 2px solid #4CAF50; }
+.tc-swatch.half { border-top: 2px dashed #F2C94C; }
+.tc-swatch.box { width: 11px; height: 11px; border-radius: 2px; border: 1px solid var(--hairline); background: var(--bg-card); border-top-width: 1px; }
+.tc-swatch.extb { border: 1px dashed #B388FF; background: rgba(179,136,255,.06); }
+.tc-hint { position: absolute; left: 12px; bottom: 10px; font-size: 11px; color: var(--text-3); pointer-events: none; }
+
+.tc-node { cursor: pointer; }
+.tc-node rect.card { fill: #141417; stroke: #27272A; stroke-width: 1; }
+.tc-node.ext rect.card { fill: rgba(179,136,255,.06); stroke: #B388FF; stroke-dasharray: 5 4; }
+.tc-node.sel rect.card { stroke: #22D3EE; stroke-width: 1.8; }
+.tc-node.dim { opacity: .22; }
+.tc-node .nm { font-size: 12px; font-weight: 700; fill: #FAFAFA; }
+.tc-node .ip { font-size: 10.5px; fill: #71717A; font-family: Consolas, Menlo, monospace; }
+.tc-node .role { font-size: 9.5px; fill: #71717A; }
+.tc-node .tc-icon { stroke: #22D3EE; fill: none; stroke-width: 1.4; }
+.tc-node .tc-icon.fw { stroke: #FF8A50; fill: rgba(255,138,80,.10); stroke-width: 1.5; stroke-linejoin: round; }
+.tc-node.ext .tc-icon { stroke: #B388FF; }
+.tc-edge { fill: none; stroke-width: 1.5; }
+.tc-edge.confirmed { stroke: #4CAF50; }
+.tc-edge.half { stroke: #F2C94C; stroke-dasharray: 6 4; }
+.tc-edge.conflict { stroke: #FF5252; stroke-dasharray: 6 4; }
+.tc-edge.peer { stroke: #22D3EE; stroke-width: 2.2; stroke-dasharray: 1 5; stroke-linecap: round; }
+.tc-peerlbl { font-size: 9px; fill: #22D3EE; text-anchor: middle; pointer-events: none; }
+.tc-edge.hit { stroke: transparent; stroke-width: 14; cursor: pointer; stroke-dasharray: none; }
+.tc-edge.sel { stroke-width: 2.8; }
+.tc-edge.dim { opacity: .14; }
+.tc-elbl { font-size: 9px; fill: #A1A1AA; font-family: Consolas, Menlo, monospace; pointer-events: none; }
+
+.tc-searchlist { position: absolute; z-index: 5; top: 36px; left: 0; background: var(--bg-card); border: 1px solid var(--hairline); border-radius: 8px; max-height: 300px; overflow-y: auto; width: 340px; box-shadow: 0 8px 24px rgba(0,0,0,.55); }
+.tc-searchlist .it { padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--hairline); }
+.tc-searchlist .it:hover { background: var(--bg-inset, #1B1B1F); }
+.tc-searchlist .it .s { font-size: 11px; color: var(--text-3); }
+
+.tc-linkcard { border: 1px solid var(--hairline); border-radius: 8px; padding: 10px; background: var(--bg-inset, #1B1B1F); margin-bottom: 8px; }
+.tc-linkcard .t { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.tc-kv { display: grid; grid-template-columns: 104px 1fr; gap: 5px 8px; font-size: 12px; margin-bottom: 10px; }
+.tc-kv .k { color: var(--text-3); }
+.tc-kv .v { word-break: break-all; }
+.tc-st-ok { color: var(--sev-healthy, #4CAF50); } .tc-st-warn { color: var(--sev-warning, #F2C94C); }
+.tc-st-crit { color: var(--sev-critical, #FF5252); } .tc-st-ext { color: #B388FF; } .tc-st-dim { color: var(--text-3); }
+.tc-devlist { display: flex; flex-direction: column; gap: 6px; }
+.tc-devrow { border: 1px solid var(--hairline); border-radius: 6px; padding: 7px 10px; cursor: pointer; background: var(--bg-inset, #1B1B1F); }
+.tc-devrow:hover { border-color: var(--text-3); }
+.tc-devrow .nm2 { font-size: 12px; font-weight: 600; }
+.tc-devrow .sub { font-size: 11px; color: var(--text-3); }
+.tc-note { font-size: 11px; color: var(--text-3); border: 1px dashed var(--hairline); border-radius: 6px; padding: 9px; margin-top: 10px; line-height: 1.7; }
+.tc-tabs { display: flex; border-bottom: 1px solid var(--hairline); margin-bottom: 10px; }
+.tc-tabs button { flex: 1; background: transparent; border: 0; color: var(--text-2); padding: 8px 4px; font-size: 12px; cursor: pointer; border-bottom: 2px solid transparent; }
+.tc-tabs button.on { color: var(--dom-network, #22D3EE); border-bottom-color: var(--dom-network, #22D3EE); }
+
+/* 全网总览：底部网格分区标题 */
+.tc-gridlabel { font-size: 15px; font-weight: 700; fill: #71717A; }
+g#vp.lod-far .tc-gridlabel { display: none; }
+
+/* 缩略图（minimap）：全网总览右下角全景 + 视口框，点击/拖动跳转 */
+.tc-mm { position: absolute; right: 12px; bottom: 34px; width: 220px; background: rgba(16,16,19,.92); border: 1px solid var(--hairline); border-radius: 8px; padding: 6px 8px 4px; cursor: crosshair; z-index: 4; }
+.tc-mm.off { display: none; }
+.tc-mm svg { display: block; }
+.tc-mm-tip { font-size: 10px; color: var(--text-3); margin-bottom: 3px; pointer-events: none; }
+.tc-mm-node { fill: #52525B; stroke: none; }
+.tc-mm-edge { fill: none; stroke: #2A2A2F; stroke-width: .6; }
+.tc-mm-vp { fill: rgba(34,211,238,.08); stroke: #22D3EE; stroke-width: 1.2; }
+
+/* 架构全览（钻取视图 TopoTree）：层带标题/分隔线、核心根卡片、展开徽标 */g#tvp .tc-band { font-size: 14px; font-weight: 700; fill: #71717A; }
+g#tvp .tc-bandline { stroke: #27272A; stroke-width: 1; stroke-dasharray: 4 6; }
+g#tvp.lod-far .tc-band, g#tvp.lod-far .tc-bandline { display: none; }
+.tc-node.troot rect.card { stroke: #22D3EE; stroke-width: 1.6; }
+.tc-node rect.tgl { fill: #1F1F23; stroke: #3F3F46; stroke-width: 1; }
+.tc-node text.tgl-t { font-size: 9px; fill: #A1A1AA; text-anchor: middle; stroke: none; }
+g#tvp.lod-far .tc-node rect.tgl, g#tvp.lod-far .tc-node text.tgl-t { display: none; }
+.tc-swatch.rootb { width: 11px; height: 11px; border-radius: 2px; border: 1.5px solid #22D3EE; background: var(--bg-card); border-top-width: 1.5px; }
+.tc-swatch.peer { border-top: 2px dotted #22D3EE; }
+/* 钻取视图 EXT 未纳管对端卡片（node_id<0）与 chassis 升格链路端口标注 */
+g#tvp .tc-node.ext rect.card { fill: rgba(179,136,255,.06); stroke: #B388FF; stroke-dasharray: 5 4; }
+g#tvp .tc-node.ext .tc-icon.extq { stroke: none; fill: #B388FF; }
+g#tvp .tc-uplbl { font-size: 8.5px; fill: #8A7A45; text-anchor: middle; pointer-events: none; }
+g#tvp.lod-far .tc-uplbl { display: none; }
+.tc-swatch.upgraded { border-top: 2px dashed #F2C94C; }
+/* 钻取视图连线点选：透明宽命中区 + 选中高亮 + 其余变暗 + 端口气泡 */
+g#tvp path.tc-edgehit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
+g#tvp.sel-mode [data-led]:not(.esel) { opacity: .12; }
+g#tvp.sel-mode .tc-node:not(.hi) { opacity: .22; }
+g#tvp .esel path.tc-edge.confirmed { stroke-width: 3; filter: drop-shadow(0 0 5px #4CAF50); }
+g#tvp .esel path.tc-edge.half { stroke-width: 3; filter: drop-shadow(0 0 5px #F2C94C); }
+g#tvp .esel path.tc-edge.conflict { stroke-width: 3; filter: drop-shadow(0 0 5px #FF5252); }
+g#tvp .esel path.tc-edge.peer { stroke-width: 3.2; filter: drop-shadow(0 0 5px #22D3EE); }
+g#tvp .esel .tc-peerlbl { fill: #A5F3FC; font-weight: 700; }
+g#tvp .esel .tc-uplbl { fill: #FDE68A; font-weight: 700; }
+g#tvp .tc-node.hi rect.card { stroke: #FAFAFA; stroke-width: 2.2; }
+g#tvp .tc-node.hi.ext rect.card { stroke: #D1B3FF; }
+g#tvp .tc-selport { font-size: 10px; fill: #FAFAFA; text-anchor: middle; pointer-events: none; stroke: none; }
+g#tvp .tc-selportbg { fill: rgba(16,16,19,.95); stroke: #52525B; stroke-width: 1; }
+
+/* LOD：远看只见卡片与连线颜色，放大逐级恢复文字（全网总览可读性） */
+g#vp.lod-mid .tc-elbl, g#vp.lod-mid .tc-node .ip, g#vp.lod-mid .tc-node .role { display: none; }
+g#vp.lod-far .tc-node .nm, g#vp.lod-far .tc-icon { display: none; }
+/* 远看时卡片提亮加边，保证小缩放下仍可见"节点星座" */
+g#vp.lod-far .tc-node rect.card { fill: #232329; stroke: #52525B; stroke-width: 2.5; }
+g#vp.lod-far .tc-node.ext rect.card { fill: rgba(179,136,255,.12); stroke: #B388FF; }
+g#vp.lod-far .tc-edge { stroke-width: 2.5; }

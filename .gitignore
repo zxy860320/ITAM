@@ -7,3 +7,13 @@ output/
 .DS_Store
 # 含真实 Zabbix API token，切勿入库（仓库保留 source.example.json 模板）
 server/data/source.json
+
+# topology-svc 运行时 SQLite 库与备份（含现网设备/链路数据，不入库）
+topology/data/
+# 告警出口配置含真实 webhook/SMTP 密码；状态文件为运行时数据
+server/data/notify.json
+server/data/notify_state.json
+# zCloud 采样缓存（运行时数据）
+server/data/dbmp_samples.json
+# playwright 调试产物
+.playwright-cli/

@@ -2,6 +2,7 @@ import React from 'react';
 import { api, usePoll } from '../api';
 import { Badge, Spark, Meter, Pager, ago, DOM_COLOR } from '../components/common';
 import EntityDetailDrawer from './EntityDetailDrawer';
+import DbDetailDrawer from './DbDetailDrawer';
 
 /** 域监控页通用骨架：KPI 行 + 工具条 + 列表 + 详情抽屉 */
 export default function EntityPage({ domain, summary }: { domain: string; summary: any }) {
@@ -63,7 +64,11 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
                 </tr>
               ))}
               {(!data?.rows?.length) && (
-                <tr><td colSpan={buildCols(domain, []).length} className="empty-tip">该域暂无监控对象 — 在 Zabbix 中为相关主机挂载对应模板后会自动归入本域</td></tr>
+                <tr><td colSpan={buildCols(domain, []).length} className="empty-tip">
+                  {domain === 'database'
+                    ? '该域暂无监控对象 — zCloud(dbmp) 北向API 未返回实例（检查 对接页 数据库数据源状态）'
+                    : '该域暂无监控对象 — 在 Zabbix 中为相关主机挂载对应模板后会自动归入本域'}
+                </td></tr>
               )}
             </tbody>
           </table>
@@ -83,8 +88,10 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
         </div>
       </div>
 
-      {/* 详情抽屉 */}
-      {detail && <EntityDetailDrawer entity={detail} onClose={() => setDetail(null)} />}
+      {/* 详情抽屉：dbmp（zCloud）数据库实体走 DB 专属抽屉，其余走通用设备抽屉 */}
+      {detail && (String(detail.hostid || '').startsWith('dbmp-')
+        ? <DbDetailDrawer entity={detail} onClose={() => setDetail(null)} />
+        : <EntityDetailDrawer entity={detail} onClose={() => setDetail(null)} />)}
     </div>
   );
 }
@@ -97,18 +104,24 @@ function buildCols(domain: string, rows: any[]): Col[] {
   const empty = rows.length === 0;
   const cols: Col[] = [{ key: 'name', th: '名称', w: '22%' }];
   if (!empty && any(r => r.ip)) cols.push({ key: 'ip', th: 'IP', w: '12%', cls: 'mono' });
-  cols.push({ key: 'group', th: domain === 'service' ? '分组' : '群组', w: '12%' });
+  cols.push({ key: 'group', th: domain === 'service' ? '分组' : domain === 'database' ? '集群' : '群组', w: '12%' });
   if (domain === 'service') {
     cols.push({ key: 'rt', th: 'RT P95', w: '12%', cls: 'mono num' });
     cols.push({ key: 'qps', th: 'QPS', w: '12%', cls: 'mono num' });
     cols.push({ key: 'successRate', th: '成功率', w: '10%', cls: 'mono num' });
     cols.push({ key: 'instances', th: '实例', w: '8%', cls: 'mono num' });
+  } else if (domain === 'database') {
+    cols.push({ key: 'dbRole', th: '角色', w: '8%' });
+    cols.push({ key: 'version', th: '版本', w: '10%', cls: 'mono' });
+    cols.push({ key: 'conn', th: '连接数', w: '12%', cls: 'mono num' });
+    cols.push({ key: 'threads', th: '活跃线程', w: '8%', cls: 'mono num' });
+    cols.push({ key: 'qps', th: 'QPS', w: '10%', cls: 'mono num' });
   } else {
     cols.push({ key: 'cpu', th: 'CPU', w: '18%' });
     cols.push({ key: 'mem', th: '内存', w: '18%' });
     if (!empty && any(r => r.disk != null)) cols.push({ key: 'disk', th: '磁盘', w: '8%', cls: 'mono num' });
   }
-  const sparkKey = domain === 'service' ? 'rtSpark' : 'cpuSpark';
+  const sparkKey = domain === 'service' ? 'rtSpark' : domain === 'database' ? 'qpsSpark' : 'cpuSpark';
   if (!empty && any(r => r[sparkKey]?.length)) cols.push({ key: 'spark', th: '趋势', w: '10%' });
   cols.push({ key: 'problems', th: '告警', w: '6%', cls: 'num' });
   cols.push({ key: 'availability', th: '状态', w: '9%' });
@@ -126,6 +139,7 @@ function Colgroup({ cols }: { cols: Col[] }) {
 }
 
 function cell(key: string, r: any, domain: string) {
+  const dbm = r.dbMetrics || {};
   switch (key) {
     case 'name':
       return <span title={r.name}>{r.name}</span>;
@@ -134,14 +148,29 @@ function cell(key: string, r: any, domain: string) {
     case 'group':
       return <span style={{ color: 'var(--text-3)' }} title={r.group}>{r.group || '—'}</span>;
     case 'rt': return r.rt ? `${r.rt}ms` : '—';
-    case 'qps': return r.qps?.toLocaleString?.() ?? '—';
+    case 'qps': {
+      const v = domain === 'database' ? dbm.qps : r.qps;
+      return v != null ? v.toLocaleString?.() ?? v : '—';
+    }
     case 'successRate':
       return <span style={{ color: r.successRate < 98.5 && r.successRate > 0 ? 'var(--sev-warning)' : undefined }}>{r.successRate ? `${r.successRate}%` : '—'}</span>;
     case 'instances': return r.instances ?? '—';
+    case 'dbRole':
+      return <span style={{ color: r.dbRole === 'master' ? '#38BDF8' : 'var(--text-2)' }}>{r.dbRole || '—'}</span>;
+    case 'version': return <span style={{ fontSize: 11 }}>{r.version || '—'}</span>;
+    case 'conn': {
+      if (dbm.threads_connected == null) return <span style={{ color: 'var(--text-3)' }}>—</span>;
+      const pct = dbm.conn_pct;
+      return <span title={dbm.max_connections ? `max_connections=${dbm.max_connections}（占用 ${pct}%）` : undefined}
+        style={{ color: pct != null && pct >= 80 ? 'var(--sev-warning)' : undefined }}>{dbm.threads_connected}{dbm.max_connections ? ` / ${dbm.max_connections}` : ''}</span>;
+    }
+    case 'threads': return dbm.threads_running != null
+      ? <span style={{ color: dbm.threads_running >= 30 ? 'var(--sev-warning)' : undefined }}>{dbm.threads_running}</span>
+      : <span style={{ color: 'var(--text-3)' }}>—</span>;
     case 'cpu': return r.cpu == null ? <span style={{ color: 'var(--text-3)' }}>—</span> : <Meter value={r.cpu} />;
     case 'mem': return r.mem == null ? <span style={{ color: 'var(--text-3)' }}>—</span> : <Meter value={r.mem} />;
     case 'disk': return r.disk == null ? '—' : `${r.disk}%`;
-    case 'spark': return <Spark data={domain === 'service' ? r.rtSpark : r.cpuSpark} w={86} color={DOM_COLOR[domain]} />;
+    case 'spark': return <Spark data={domain === 'service' ? r.rtSpark : domain === 'database' ? r.qpsSpark : r.cpuSpark} w={86} color={DOM_COLOR[domain]} />;
     case 'problems':
       return <span className="mono" style={{ color: r.problems ? 'var(--sev-critical)' : 'var(--text-3)' }}>{r.problems || '—'}</span>;
     case 'availability': return <Badge sev={r.availability} />;

@@ -76,8 +76,10 @@ React SPA（web/src/，:5273）
 - `series()`：窗口 span > 86400s → `trend.get`（grain='hour'，返回 avg + min/max 包络数组）；否则 `history.get`（grain='raw'，分钟级原始点）。
 
 ### 6.2 多指标拉取（一次 item.get 全拿）
-search key_ 模式（searchByAny）：`system.cpu.util / hwCPUUsage / hrProcessorLoad / hwEntityCPUUtilization / vm.memory.util / hrMemoryLoad / vm.memory.size / icmppingsec / sensor.temp.value / system.cpu.load / proc.num / vfs.fs / net.if.in / net.if.out`。
-然后 `pick(候选key序列, pref)` 按优先级选首个 `lastclock>0` 的 item，产出 7 类指标 + traffic。
+search key_ 模式（searchByAny）：`system.cpu.util / hwCPUUsage / hrProcessorLoad / hwEntityCPUUtilization / vm.memory.util / hrMemoryLoad / vm.memory.size / icmppingsec / sensor.temp.value / system.cpu.load / proc.num / vfs.fs / net.if.in / net.if.out / vfs.dev.read.rate / vfs.dev.write.rate`。
+然后 `pick(候选key序列, pref)` 按优先级选首个 `lastclock>0` 的 item，产出 7 类指标 + traffic + **dio（磁盘 I/O）**。
+- **dio**：`vfs.dev.read.rate[dev]` / `vfs.dev.write.rate[dev]`（IOPS，ops/s），读写同参天然配对（区别于网络流量的不对称坑）；设备下拉 `devs`（'' = 自动选现值读写和最大的活跃盘），series 请求带 `dev=` 参数。Linux agent 主机有（vda/vdb），网络设备没有 → 前端 `dioOn` 自动隐藏。**注意**：Zabbix 对长期恒定值（空闲盘 0）不写 trend 行，7d/30d 窗可能空属正常。
+- **fs 分区选择**：series 返回 `mnts`（全部挂载点清单，正则 `FS_PUSED_RE` 兼容 `vfs.fs[.dependent].size[mnt,pused]` 两代 key，units='%'，含现值 cur，根分区排最前）；series 请求带 `mnt=` 参数 → `chosen.fs` 精确取该挂载点，`meta.fs.mnt` 回显当前挂载点。前端"磁盘使用"卡有分区下拉（'' = 自动选根分区，无根分区退 pused 首个）。同样受 trend 恒定值行为影响：使用率长期不变的分区 7d/30d 可能只有零星 trend 点，属正常。
 
 各设备类型实测 key 形态（真实环境）：
 - **H3C 交换机**：`system.cpu.util[hh3cEntityExtCpuUsage.212]`、`vm.memory.util[hh3cEntityExtMemUsage.212]`、`sensor.temp.value[hh3cEntityExtTemperature.212]`（°C）、`icmppingsec`、`net.if.in[ifHCInOctets.<ifIndex>]`（value_type=3 unsigned, bps）
@@ -88,7 +90,7 @@ SNMP 设备 in/out 的 key 参数**不对称**：`net.if.in[ifHCInOctets.10]` vs
 解法：正则 `^(ifHCInOctets|ifHCOutOctets|ifInOctets|ifOutOctets)\.(.+)$` 归一化为 pairKey `ifidx:<ifIndex>`；agent 设备两侧同参（去引号后接口名）。
 - 展示 label 从 item name `/Interface\s+([^(（:：]+)/` 提取（如 `GigabitEthernet1/0/48`）
 - 下拉 value=pairKey、显示 label；`iface=''` 时自动选"现值收发和最大"的活跃口
-- 排除带逗号变体（errors/discards）
+- 排除带逗号变体（errors/discards）；**detail 的接口表相反——逗号变体必须识别归位**：agent 设备 `net.if.in["eth0",errors]` / `[...,dropped]` 若不识别会被当主项，0 覆盖真实 bps（IFRE 已兼容点式与逗号式，dropped 归入丢弃）
 
 ### 6.4 limit 全局截断坑
 `history.get / trend.get` 的 `limit` 是**整个请求所有 item 的总点数**。多指标 24h ≈ 6700 点 → history limit **16000**、trend limit **9000**。改小会静默截断（丢最近数据）。
@@ -107,6 +109,8 @@ SNMP 设备 in/out 的 key 参数**不对称**：`net.if.in[ifHCInOctets.10]` vs
 2. `item.get` 用 `state:0, status:0` 过滤启用项；**`monitored:true` 与 search 组合会返回 0**（行为异常，勿用）。
 3. `item.get` 没有 `value_` 字段；现值取 `lastvalue/lastclock`。
 4. 多核/多实例指标是变体 key（`system.cpu.util[xxx.0]`），要 `search + searchByAny`，不要精确 filter。
+4b. **`system.cpu.util[,idle]` 等逗号分量变体不是使用率**（idle=空闲 99.5% 会冒充 CPU 99.5%）。列表汇总与 series/detail 的 pick 均须跳过 `system.cpu.util[,` 前缀（zabbixClient.CPU_COMPONENT_RE）。
+4c. **概览"磁盘使用"两代 key 都要认**：旧模板 `vfs.fs.size[/,pused]`，Zabbix 7.x 新 agent 模板改成依赖项 `vfs.fs.dependent.size[/,pused]`。列表汇总用正则 `DISK_RE`（兼容 dependent.）匹配，根分区（`/`、`c:\`）优先、否则取所有挂载点最大值；同步 search 里要带 `vfs.fs.size` 与 `vfs.fs.dependent.size` 两个前缀，只写精确旧 key 会导致新模板主机 disk=null（概览显示"—"，但趋势卡有数据）。
 5. trend 字段是 `trends`；trend.get 需 `output:['itemid','clock','value_min','value_avg','value_max']`。
 6. 排查"返回空"：先用 `countOutput` 确认对象存在，再逐步缩小过滤条件；并核对 curl 是否忘带 Bearer 头。
 

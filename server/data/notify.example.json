@@ -1,0 +1,61 @@
+{
+  "enabled": false,
+  "consoleUrl": "http://localhost:5273/#/dashboard",
+  "channels": [
+    {
+      "id": "ch_example_dingtalk",
+      "type": "dingtalk",
+      "label": "钉钉-值班群",
+      "enabled": false,
+      "webhook": "https://oapi.dingtalk.com/robot/send?access_token=<替换>",
+      "secret": "<加签密钥 SECxxxx，可空>",
+      "keyword": "告警",
+      "minSeverity": "warning",
+      "domains": [],
+      "pattern": "",
+      "includeRecovery": true
+    },
+    {
+      "id": "ch_example_feishu",
+      "type": "feishu",
+      "label": "飞书-值班群",
+      "enabled": false,
+      "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/<替换>",
+      "secret": "<签名密钥，可空>",
+      "minSeverity": "warning",
+      "domains": [],
+      "pattern": "",
+      "includeRecovery": true
+    },
+    {
+      "id": "ch_example_wecom",
+      "type": "wecom",
+      "label": "企业微信-值班群",
+      "enabled": false,
+      "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<替换>",
+      "minSeverity": "warning",
+      "domains": [],
+      "pattern": "",
+      "includeRecovery": true
+    },
+    {
+      "id": "ch_example_email",
+      "type": "email",
+      "label": "邮件(SMTP)",
+      "enabled": false,
+      "minSeverity": "warning",
+      "domains": [],
+      "pattern": "",
+      "includeRecovery": true,
+      "smtp": {
+        "host": "smtp.partner.outlook.cn",
+        "port": 587,
+        "secure": false,
+        "user": "<发信账号>",
+        "pass": "<授权码/密码>",
+        "from": "<发信账号>"
+      },
+      "to": ["<收件人1@x.com>", "<收件人2@x.com>"]
+    }
+  ]
+}

@@ -3,8 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ZabbixCollector } from './collector/zabbixClient.js';
+import { DbmpClient } from './collector/dbmpClient.js';
 import { summary, topProblems, eventTrend, listFilter, paginate, byDomain, DOMAIN_LABEL } from './collector/aggregate.js';
 import { GROUP_MAPPING } from './collector/mockData.js';
+import { Notifier } from './alerter/alerter.js';
 
 const PORT = process.env.PORT || 8787;
 // 数据源开关：mock | zabbix（真实 Zabbix JSON-RPC 2.0）
@@ -16,19 +18,48 @@ const DS = {
   token: process.env.ZBX_TOKEN || '',
   freq: Number(process.env.COLLECT_FREQ || 60),
 };
+// zCloud(dbmp) 北向API 数据源配置 —— 补齐「数据库」域（Zabbix 现网无 DB 模板）
+// 实测通道：GET :8023/dbaasInfrastructure/customApi/getDbInfo|getCustomInfo（免鉴权，见 tmp/dbmp_integration_analysis.md）
+const DBMP = {
+  enabled: (process.env.DBMP_ENABLED || '1') !== '0',
+  base: process.env.DBMP_BASE || 'http://10.70.0.94:8023',
+};
 try {
   const c = JSON.parse(fs.readFileSync(SRC_CFG, 'utf-8'));
   Object.assign(DS, { mode: c.mode ?? DS.mode, endpoint: c.endpoint ?? DS.endpoint, token: c.token ?? DS.token, freq: c.freq ?? DS.freq });
-  console.log(`[ityw-server] 已加载持久化数据源配置: mode=${DS.mode} endpoint=${DS.endpoint}`);
+  if (c.dbmp) Object.assign(DBMP, { enabled: c.dbmp.enabled ?? DBMP.enabled, base: c.dbmp.base ?? DBMP.base });
+  console.log(`[ityw-server] 已加载持久化数据源配置: mode=${DS.mode} endpoint=${DS.endpoint} dbmp=${DBMP.enabled ? DBMP.base : 'off'}`);
 } catch { /* 首次运行无配置文件 */ }
 function persistSource() {
   try {
     fs.mkdirSync(path.dirname(SRC_CFG), { recursive: true });
-    fs.writeFileSync(SRC_CFG, JSON.stringify({ mode: DS.mode, endpoint: DS.endpoint, token: DS.token, freq: DS.freq }, null, 2));
+    fs.writeFileSync(SRC_CFG, JSON.stringify({ mode: DS.mode, endpoint: DS.endpoint, token: DS.token, freq: DS.freq, dbmp: DBMP }, null, 2));
   } catch (e) { console.warn('[ityw-server] source.json 持久化失败:', e.message); }
 }
 
 const collector = new ZabbixCollector(DS);
+// 告警出口：钉钉/飞书/企业微信/邮件。配置持久化 data/notify.json，差分状态 data/notify_state.json
+const NOTIFY_CFG = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'notify.json');
+const notifier = new Notifier(NOTIFY_CFG, path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'notify_state.json'));
+/** 事件→主机可读名（告警消息用） */
+function evHostName(ev) {
+  const ds = collector.dataset;
+  if (!ds) return '';
+  const ent = ds.hosts.find(h => h.hostid === ev.hostid) || ds.services.find(s => s.serviceid === ev.hostid || s.serviceid === ev.objectid);
+  return ent ? (ent.name || ent.host || '') : '';
+}
+const dbmp = new DbmpClient({
+  base: DBMP.base, enabled: DBMP.enabled, freq: DS.freq,
+  sampleFile: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'dbmp_samples.json'),
+});
+
+/** 主数据源（Zabbix/mock）+ dbmp 数据库域实体合并视图 */
+function mergedData() {
+  const ds = collector.data;
+  if (!dbmp.enabled || !dbmp.entities.length) return ds;
+  return { ...ds, hosts: [...ds.hosts, ...dbmp.entities] };
+}
+const isDbmpId = id => String(id).startsWith('dbmp-');
 
 const app = express();
 app.use(express.json());
@@ -41,7 +72,7 @@ const guard = (req, res, next) => {
 
 // ---------- 总览 / 大屏 ----------
 app.get('/api/summary', guard, (req, res) => {
-  const ds = collector.data;
+  const ds = mergedData();
   res.json({
     ...summary(ds),
     collector: {
@@ -52,7 +83,7 @@ app.get('/api/summary', guard, (req, res) => {
 });
 
 app.get('/api/dashboard', guard, (req, res) => {
-  const ds = collector.data;
+  const ds = mergedData();
   res.json({
     ...summary(ds),
     collector: {
@@ -71,7 +102,7 @@ app.get('/api/dashboard', guard, (req, res) => {
 
 // ---------- 实体列表（主机/网络/数据库/服务 通用） ----------
 app.get('/api/entities', guard, (req, res) => {
-  const ds = collector.data;
+  const ds = mergedData();
   const all = [...ds.hosts, ...ds.services];
   const filtered = listFilter(all, req.query);
   const sorted = filtered.sort((a, b) => {
@@ -83,18 +114,24 @@ app.get('/api/entities', guard, (req, res) => {
 
 // ---------- 单实体详情 + 时序 ----------
 app.get('/api/entities/:id', guard, (req, res) => {
-  const ds = collector.data;
+  const ds = mergedData();
   const ent = [...ds.hosts, ...ds.services].find(x => x.hostid === req.params.id || x.serviceid === req.params.id);
   if (!ent) return res.status(404).json({ error: 'not found' });
   // 生成近 6 小时分钟级时序（借用确定性 rng 保证刷新稳定）
   res.json({ entity: ent, events: ds.events.filter(e => (e.hostid || e.objectid) === (ent.hostid || ent.serviceid)).slice(0, 20) });
 });
 
-// ---------- 设备深度详情（Zabbix 按需实时拉取：档案/接口/全监控项/6h时序） ----------
+// ---------- 设备深度详情（Zabbix 按需实时拉取：档案/接口/全监控项/6h时序；dbmp 实体走 DB 专属详情） ----------
 app.get('/api/entities/:id/detail', guard, async (req, res) => {
-  const ds = collector.data;
+  const ds = mergedData();
   const ent = [...ds.hosts, ...ds.services].find(x => x.hostid === req.params.id || x.serviceid === req.params.id);
   if (!ent) return res.status(404).json({ error: 'not found' });
+  // dbmp（zCloud）数据库实体：详情来自北向API实时快照，不走 mock 兜底（避免伪造）
+  if (isDbmpId(req.params.id)) {
+    const d = dbmp.detail(req.params.id.slice(5));
+    if (d) return res.json({ detail: d });
+    return res.json({ detail: { kind: 'db', source: 'zCloud(dbmp) 北向API', profile: { instanceName: ent.name, hostIp: ent.ip, dbType: ent.dbType, version: ent.version, dbRole: ent.dbRole, dbState: ent.dbState }, keyStatus: [], config: {}, databases: [], users: [], allStatusVars: [], allConfigVars: [], note: '该集群暂无 getCustomInfo 快照数据' } });
+  }
   try {
     const detail = await collector.detail(req.params.id);
     // mock 模式（detail 返回 null）→ 从本地数据集拼一份轻量详情，保证 UI 不空
@@ -121,23 +158,29 @@ function mockDetail(ent) {
   };
 }
 
-// ---------- 时间窗时序（range=6h/24h/7d/30d；till=结束锚点秒，回看过去某段；iface=流量接口） ----------
+// ---------- 时间窗时序（range=6h/24h/7d/30d；till=结束锚点秒，回看过去某段；iface=流量接口；dev=磁盘设备；mnt=磁盘分区挂载点） ----------
 app.get('/api/entities/:id/series', guard, async (req, res) => {
-  const ds = collector.data;
+  const ds = mergedData();
   const ent = [...ds.hosts, ...ds.services].find(x => x.hostid === req.params.id || x.serviceid === req.params.id);
   if (!ent) return res.status(404).json({ error: 'not found' });
   const range = String(req.query.range || '6h');
   const till = Number(req.query.till || 0);
   const iface = String(req.query.iface || '');
+  const dev = String(req.query.dev || '');
+  const mnt = String(req.query.mnt || '');
+  // dbmp 实体：本地真实采样差值序列（不调 Zabbix、不走 mockSeries 伪造）
+  if (isDbmpId(req.params.id)) {
+    return res.json({ series: dbmp.series(req.params.id.slice(5), range, till) });
+  }
   try {
-    const s = await collector.series(req.params.id, range, till, iface);
-    res.json({ series: s || mockSeries(ent, range, till, iface) });
+    const s = await collector.series(req.params.id, range, till, iface, dev, mnt);
+    res.json({ series: s || mockSeries(ent, range, till, iface, dev, mnt) });
   } catch (e) {
-    res.status(502).json({ error: String(e.message || e), series: mockSeries(ent, range, till, iface) });
+    res.status(502).json({ error: String(e.message || e), series: mockSeries(ent, range, till, iface, dev, mnt) });
   }
 });
 
-function mockSeries(ent, range, till, iface) {
+function mockSeries(ent, range, till, iface, dev, mnt) {
   const SPAN = { '6h': 6 * 3600, '24h': 24 * 3600, '7d': 7 * 86400, '30d': 30 * 86400 };
   const span = SPAN[range] || SPAN['6h'];
   const now = Math.floor(Date.now() / 1000);
@@ -156,18 +199,29 @@ function mockSeries(ent, range, till, iface) {
   const band = span > 86400;
   const empty = band ? { avg: [], max: [], min: [] } : { avg: [] };
   const isNet = ent.domain === 'network';
+  const dioDev = dev || 'vda';
+  const mntList = !isNet && ent.disk != null
+    ? [{ mnt: '/', label: 'FS [/]: Space: Used, in %', cur: ent.disk }, { mnt: '/data', label: 'FS [/data]: Space: Used, in %', cur: Math.min(99, (ent.disk ?? 0) + 5) }]
+    : [];
+  const fsMnt = mnt || (mntList[0]?.mnt || '');
+  const fsBase = mnt ? (mntList.find(x => x.mnt === mnt)?.cur ?? ent.disk) : ent.disk;
   const series = {
     cpu: ent.cpu == null ? empty : mk(ent.cpu, 20, band),
     mem: ent.mem == null ? empty : mk(ent.mem, 15, band),
     temp: !isNet ? empty : mk(55, 8, band),
     load: isNet ? empty : mk(1.2, 0.8, band),
     proc: isNet ? empty : mk(420, 60, band),
-    fs: ent.disk == null ? empty : mk(ent.disk, 3, band),
+    fs: fsBase == null ? empty : mk(fsBase, 3, band),
     ping: ent.ping == null ? empty : mk(3, 2, band),
     traffic: {
       iface: iface || 'eth0', label: iface || 'eth0',
       in: isNet ? mk(240e6, 120e6, band) : empty,
       out: isNet ? mk(180e6, 90e6, band) : empty,
+    },
+    dio: {
+      dev: dioDev,
+      read: !isNet && ent.disk != null ? mk(35, 30, band) : empty,
+      write: !isNet && ent.disk != null ? mk(60, 50, band) : empty,
     },
   };
   return {
@@ -175,10 +229,13 @@ function mockSeries(ent, range, till, iface) {
     grain: band ? 'hour' : 'raw',
     points: ['cpu', 'mem', 'temp', 'load', 'proc', 'fs', 'ping']
       .reduce((n, k) => n + (series[k]?.avg?.length || 0), 0)
-      + (series.traffic.in.avg?.length || 0) + (series.traffic.out.avg?.length || 0),
+      + (series.traffic.in.avg?.length || 0) + (series.traffic.out.avg?.length || 0)
+      + (series.dio.read.avg?.length || 0) + (series.dio.write.avg?.length || 0),
     retention: { history: '31d', trends: '365d' },
-    meta: { fs: { label: '磁盘使用', units: '%' }, traffic: { units: 'bps' } },
+    meta: { fs: { label: mntList.find(x => x.mnt === fsMnt)?.label || '磁盘使用', units: '%', mnt: fsMnt }, traffic: { units: 'bps' }, dio: { units: 'ops/s' } },
     ifaces: isNet ? [{ iface: 'eth0', label: 'eth0' }, { iface: 'eth1', label: 'eth1' }] : [],
+    devs: !isNet && ent.disk != null ? [{ dev: 'vda' }, { dev: 'vdb' }] : [],
+    mnts: mntList,
     series,
   };
 }
@@ -201,6 +258,23 @@ app.post('/api/events/:id/ack', guard, (req, res) => {
   res.json({ ok: true, event: ev });
 });
 
+// ---------- 告警出口（钉钉/飞书/企业微信/邮件） ----------
+app.get('/api/notify', (req, res) => res.json(notifier.publicView()));
+
+app.post('/api/notify/save', (req, res) => {
+  try {
+    notifier.saveConfig(req.body || {});
+    res.json({ ok: true, channels: notifier.cfg.channels.length, enabled: notifier.cfg.enabled });
+  } catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+app.post('/api/notify/test', async (req, res) => {
+  try {
+    const r = await notifier.testChannel(String(req.body?.id || ''));
+    res.json(r);
+  } catch (e) { res.status(502).json({ ok: false, error: String(e.message || e) }); }
+});
+
 // ---------- 监控源对接 ----------
 app.get('/api/source', (req, res) => {
   res.json({
@@ -213,26 +287,37 @@ app.get('/api/source', (req, res) => {
     lastSync: collector.lastSync, syncCount: collector.syncCount, lastError: collector.lastError,
     classifyStats: collector.classifyStats,
     mapping: collector.groupMapping || GROUP_MAPPING,
+    // 数据库域数据源：zCloud(dbmp) 北向API
+    dbmp: {
+      enabled: dbmp.enabled, base: DBMP.base,
+      lastSync: dbmp.lastSync, syncCount: dbmp.syncCount, lastError: dbmp.lastError,
+      instances: dbmp.entities.length, counts: dbmp.counts,
+    },
   });
 });
 
 app.post('/api/source/test', async (req, res) => {
   const t0 = Date.now();
   const r = await collector.sync();
+  const dr = await dbmp.sync().catch(e => ({ ok: false, error: String(e.message || e) }));
   res.json({ ...r, latencyMs: Date.now() - t0, counts: collector.dataset ? {
     hosts: collector.dataset.hosts.length, services: collector.dataset.services.length,
     events: collector.dataset.events.length,
-  } : null });
+  } : null, dbmp: { ...dr, instances: dbmp.entities.length, counts: dbmp.counts } });
 });
 
 app.post('/api/source/save', (req, res) => {
-  const { mode, endpoint, token, freq } = req.body || {};
+  const { mode, endpoint, token, freq, dbmp: dbmpCfg } = req.body || {};
   if (mode) collector.mode = DS.mode = mode === 'zabbix' ? 'zabbix' : 'mock';
   if (endpoint) collector.endpoint = DS.endpoint = endpoint;
   if (token) collector.token = DS.token = token;
   if (freq) collector.freq = DS.freq = Math.max(30, Math.min(120, Number(freq)));
+  if (dbmpCfg && typeof dbmpCfg === 'object') {
+    if (typeof dbmpCfg.enabled === 'boolean') { DBMP.enabled = dbmpCfg.enabled; dbmp.enabled = dbmpCfg.enabled; }
+    if (dbmpCfg.base) DBMP.base = dbmp.base = String(dbmpCfg.base).replace(/\/+$/, '');
+  }
   persistSource();
-  res.json({ ok: true, mode: collector.mode, freq: collector.freq });
+  res.json({ ok: true, mode: collector.mode, freq: collector.freq, dbmp: DBMP });
 });
 
 // ---------- 系统管理 ----------
@@ -257,7 +342,12 @@ app.get('/api/system', (req, res) => {
 // ---------- 启动 ----------
 async function main() {
   await collector.sync();
-  setInterval(() => collector.sync().catch(() => {}), collector.freq * 1000);
-  app.listen(PORT, () => console.log(`[ityw-server] http://localhost:${PORT}  dataSource=${DS.mode}`));
+  dbmp.sync().then(r => console.log(`[ityw-server] dbmp(zCloud) 采集: ${r.ok ? `ok 实例=${r.instances ?? 0}` : `失败: ${r.error}`}`)).catch(() => {});
+  setInterval(() => collector.sync().then(r => {
+    // 每轮采集后对活动告警差分推送（首轮只建基线不补发；失败不影响采集主链路）
+    if (r?.ok && collector.dataset) notifier.diffAndSend(collector.dataset.events, evHostName).catch(() => {});
+  }).catch(() => {}), collector.freq * 1000);
+  setInterval(() => dbmp.sync().catch(() => {}), Math.max(collector.freq, 60) * 1000);
+  app.listen(PORT, () => console.log(`[ityw-server] http://localhost:${PORT}  dataSource=${DS.mode} dbmp=${DBMP.enabled ? DBMP.base : 'off'} notify=${notifier.cfg.enabled ? notifier.cfg.channels.filter(c => c.enabled).length + '通道' : 'off'}`));
 }
 main();

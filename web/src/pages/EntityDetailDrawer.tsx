@@ -47,11 +47,13 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
   const [range, setRange] = React.useState<'6h' | '24h' | '7d' | '30d'>('6h');
   const [tillStr, setTillStr] = React.useState(''); // datetime-local，'' = 现在
   const tillEpoch = tillStr ? Math.floor(new Date(tillStr).getTime() / 1000) : 0;
-  const [metric, setMetric] = React.useState<'res' | 'temp' | 'load' | 'proc' | 'fs' | 'traffic' | 'ping'>('res');
+  const [metric, setMetric] = React.useState<'res' | 'temp' | 'load' | 'proc' | 'fs' | 'dio' | 'traffic' | 'ping'>('res');
   const [iface, setIface] = React.useState(''); // 流量接口（'' = 后端自动选活跃口）
+  const [dev, setDev] = React.useState('');     // 磁盘设备（'' = 后端自动选最活跃盘）
+  const [mnt, setMnt] = React.useState('');     // 磁盘分区挂载点（'' = 后端自动选根分区）
   const { data: sd } = usePoll(
-    () => api.entitySeries(id, { range, till: tillEpoch, iface }).then(r => r.series),
-    120000, `${id}|${range}|${tillEpoch}|${iface}`,
+    () => api.entitySeries(id, { range, till: tillEpoch, iface, dev, mnt }).then(r => r.series),
+    120000, `${id}|${range}|${tillEpoch}|${iface}|${dev}|${mnt}`,
   );
 
   React.useEffect(() => {
@@ -72,6 +74,10 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
   const ifaces: { iface: string; label: string }[] = sd?.ifaces || [];
   const has = (k: string) => (S[k]?.avg?.length || 0) > 0;
   const trafficOn = (S.traffic?.in?.avg?.length || 0) > 0 || (S.traffic?.out?.avg?.length || 0) > 0;
+  const dioOn = (S.dio?.read?.avg?.length || 0) > 0 || (S.dio?.write?.avg?.length || 0) > 0;
+  const devs: { dev: string }[] = sd?.devs || [];
+  const mnts: { mnt: string; label: string; cur: number }[] = sd?.mnts || [];
+  const fsLabel = mnt ? (mnts.find(x => x.mnt === mnt)?.label || `磁盘使用 [${mnt}]`) : (sd?.meta?.fs?.label || '磁盘使用');
 
   // x 轴标签按窗口自适应
   const xfmt = React.useCallback((t: number) => {
@@ -122,7 +128,8 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
     { key: 'temp', label: '温度', show: has('temp'), pairs: [{ name: '温度', s: S.temp || {}, color: '#F97316' }], opt: { yName: '°C' }, empty: '无温度传感器' },
     { key: 'load', label: '负载', show: has('load'), pairs: [{ name: 'Load (5m)', s: S.load || {}, color: '#A78BFA' }], opt: {}, empty: '无负载监控项' },
     { key: 'proc', label: '进程数', show: has('proc'), pairs: [{ name: '进程数', s: S.proc || {}, color: '#38BDF8' }], opt: {}, empty: '无进程数监控项' },
-    { key: 'fs', label: sd?.meta?.fs?.label || '磁盘使用', show: has('fs'), pairs: [{ name: sd?.meta?.fs?.label || '磁盘使用', s: S.fs || {}, color: '#34D399' }], opt: { yMax: 100, yName: '%' }, empty: '无磁盘使用率监控项' },
+    { key: 'fs', label: '磁盘使用', show: has('fs'), pairs: [{ name: fsLabel, s: S.fs || {}, color: '#34D399' }], opt: { yMax: 100, yName: '%' }, empty: '无磁盘使用率监控项' },
+    { key: 'dio', label: '磁盘 I/O', show: dioOn, pairs: [{ name: '读', s: S.dio?.read || {}, color: '#38BDF8' }, { name: '写', s: S.dio?.write || {}, color: '#F59E0B' }], opt: { yName: 'ops/s' }, empty: '无磁盘 I/O 监控项（vfs.dev.read/write.rate）' },
     { key: 'traffic', label: '接口流量', show: trafficOn, pairs: [{ name: '接收', s: S.traffic?.in || {}, color }, { name: '发送', s: S.traffic?.out || {}, color: '#F59E0B' }], opt: { scaleAuto: true }, empty: '无接口流量监控项' },
     { key: 'ping', label: 'ICMP 时延', show: has('ping'), pairs: [{ name: 'ICMP 时延', s: S.ping || {}, color: '#22D3EE' }], opt: { div: 1e-3, yName: 'ms' }, empty: '无 ICMP 监控项' },
   ];
@@ -240,6 +247,26 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
                   className="mono" style={{ background: 'var(--bg-inset)', border: '1px solid var(--hairline)', color: 'var(--text-1)', borderRadius: 'var(--radius-sm)', padding: '3px 6px', fontSize: 10, colorScheme: 'dark', maxWidth: 260 }}>
                   <option value="">自动（活跃口）{S.traffic?.label ? ` · 当前 ${S.traffic.label}` : ''}</option>
                   {ifaces.map(x => <option key={x.iface} value={x.iface}>{x.label}</option>)}
+                </select>
+              </label>
+            )}
+            {cur?.key === 'dio' && devs.length > 0 && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+                磁盘
+                <select value={dev} onChange={e => setDev(e.target.value)}
+                  className="mono" style={{ background: 'var(--bg-inset)', border: '1px solid var(--hairline)', color: 'var(--text-1)', borderRadius: 'var(--radius-sm)', padding: '3px 6px', fontSize: 10, colorScheme: 'dark', maxWidth: 260 }}>
+                  <option value="">自动（活跃盘）{S.dio?.dev ? ` · 当前 ${S.dio.dev}` : ''}</option>
+                  {devs.map(x => <option key={x.dev} value={x.dev}>{x.dev}</option>)}
+                </select>
+              </label>
+            )}
+            {cur?.key === 'fs' && mnts.length > 0 && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+                分区
+                <select value={mnt} onChange={e => setMnt(e.target.value)}
+                  className="mono" style={{ background: 'var(--bg-inset)', border: '1px solid var(--hairline)', color: 'var(--text-1)', borderRadius: 'var(--radius-sm)', padding: '3px 6px', fontSize: 10, colorScheme: 'dark', maxWidth: 300 }}>
+                  <option value="">自动（根分区）{sd?.meta?.fs?.mnt ? ` · 当前 ${sd.meta.fs.mnt}` : ''}</option>
+                  {mnts.map(x => <option key={x.mnt} value={x.mnt}>{x.mnt}（现值 {x.cur}%）</option>)}
                 </select>
               </label>
             )}

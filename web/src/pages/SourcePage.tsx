@@ -8,10 +8,13 @@ export default function SourcePage() {
   const [form, setForm] = React.useState({ mode: 'mock', endpoint: '', token: '', freq: 60 });
   const [testResult, setTestResult] = React.useState<any>(null);
   const [saving, setSaving] = React.useState(false);
+  const [dbmpBase, setDbmpBase] = React.useState('');
+  const [dbmpOn, setDbmpOn] = React.useState(true);
 
   React.useEffect(() => {
     if (data) setForm(f => ({ ...f, mode: data.mode, endpoint: data.mode === 'zabbix' ? data.endpoint : '', freq: data.freq }));
-  }, [data?.mode, data?.freq]);
+    if (data?.dbmp) { setDbmpBase(f0 => f0 || data.dbmp.base || ''); setDbmpOn(!!data.dbmp.enabled); }
+  }, [data?.mode, data?.freq, data?.dbmp?.enabled, data?.dbmp?.base]);
 
   const set = (k: string, v: any) => setForm(f => ({ ...f, [k]: v }));
 
@@ -76,6 +79,11 @@ export default function SourcePage() {
                   拉取对象：主机 {testResult.counts.hosts} · 服务 {testResult.counts.services} · 事件 {testResult.counts.events}
                 </div>
               )}
+              {testResult.dbmp && (
+                <div className="mono" style={{ fontSize: 12, marginTop: 4, color: testResult.dbmp.ok ? 'var(--text-2)' : 'var(--sev-critical)' }}>
+                  {testResult.dbmp.ok ? `zCloud 数据库实例 ${testResult.dbmp.instances} 个` : `zCloud 同步失败：${testResult.dbmp.error}`}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -110,6 +118,45 @@ export default function SourcePage() {
               )}
             </>
           )}
+        </div>
+      </div>
+
+      {/* 数据库数据源：zCloud(dbmp) 北向API */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-title">数据库数据源 · zCloud(dbmp) 北向API<span className="spacer" />
+          <span className={`badge ${data?.dbmp?.enabled ? (data?.dbmp?.lastError ? 'warning' : 'healthy') : 'info'}`}><i className="bdot" />
+            {data?.dbmp?.enabled ? (data?.dbmp?.lastError ? '异常' : '采集中') : '已停用'}</span>
+        </div>
+        <div className="grid-2" style={{ gap: 10, marginBottom: 10 }}>
+          <Stat label="北向API地址" value={data?.dbmp?.base || '—'} small />
+          <Stat label="数据库实例" value={data?.dbmp ? `${data.dbmp.instances} 个` : '—'} />
+          <Stat label="同步轮次" value={data?.dbmp ? `#${data.dbmp.syncCount}` : '—'} />
+          <Stat label="最近同步" value={data?.dbmp?.lastSync ? fmtTime(data.dbmp.lastSync) : '—'} small />
+        </div>
+        {data?.dbmp?.counts && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {Object.entries(data.dbmp.counts as Record<string, any>).map(([t, c]: any) => (
+              <span key={t} className={`badge ${c.error ? 'critical' : c.n ? 'healthy' : 'info'}`}><i className="bdot" />{t} · {c.n}{c.error ? ' ✘' : ''}</span>
+            ))}
+          </div>
+        )}
+        {data?.dbmp?.lastError && (
+          <div className="mono" style={{ fontSize: 12, color: 'var(--sev-critical)', marginBottom: 8 }}>最近错误：{data.dbmp.lastError}</div>
+        )}
+        <div className="field">
+          <label>北向API Base（免鉴权 customApi；留空或关闭则数据库域回到无数据态）</label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input value={dbmpBase} onChange={e => setDbmpBase(e.target.value)} placeholder="http://10.70.0.94:8023" style={{ flex: 1, maxWidth: 360 }} />
+            <div className="seg" style={{ width: 'fit-content' }}>
+              <button className={dbmpOn ? 'on' : ''} onClick={() => setDbmpOn(true)}>启用</button>
+              <button className={!dbmpOn ? 'on' : ''} onClick={() => setDbmpOn(false)}>停用</button>
+            </div>
+            <button className="btn primary" onClick={async () => { await api.sourceSave({ dbmp: { enabled: dbmpOn, base: dbmpBase } }); reload(); }}>保存</button>
+          </div>
+        </div>
+        <div style={{ color: 'var(--text-2)', fontSize: 12, lineHeight: 1.8 }}>
+          数据链路：zCloud <b className="mono">:8023 getDbInfo（资产）/ getCustomInfo（实时状态快照）</b> → 数据库域实体（角色/版本/连接/线程/库列表）→
+          趋势由本平台按周期采样真实累计计数器差值生成（zCloud 自带 Prometheus :8093 需 Basic 账密，配置后可切原生历史曲线）。
         </div>
       </div>
 

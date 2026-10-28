@@ -1,12 +1,17 @@
 import React from 'react';
 import * as echarts from 'echarts';
 
-export function Chart({ option, height = 240 }: { option: any; height?: number }) {
+export function Chart({ option, height = 240, onEvents }: { option: any; height?: number | string; onEvents?: Record<string, (p: any) => void> }) {
   const ref = React.useRef<HTMLDivElement>(null);
   const inst = React.useRef<echarts.ECharts | null>(null);
+  const evRef = React.useRef(onEvents);
+  evRef.current = onEvents;
   React.useEffect(() => {
     if (!ref.current) return;
     inst.current = echarts.init(ref.current, undefined, { renderer: 'canvas' });
+    for (const name of ['click', 'dblclick', 'mouseover', 'mouseout']) {
+      inst.current.on(name, p => evRef.current?.[name]?.(p));
+    }
     const ro = new ResizeObserver(() => inst.current?.resize());
     ro.observe(ref.current);
     return () => { ro.disconnect(); inst.current?.dispose(); };

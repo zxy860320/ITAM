@@ -3,15 +3,9 @@ import { api, usePoll } from '../api';
 import { Chart, darkBase, axisStyle } from '../components/Chart';
 import { Badge, Spark, fmtTime, ago, SEV_LABEL, DOM_COLOR } from '../components/common';
 
-/** 监控大屏 1920×1080 —— 等比缩放到视口 */
+/** 监控大屏 —— 流式铺满视口，自适应任意屏幕尺寸（不再固定 1920×1080 缩放留黑边） */
 export default function Dashboard() {
   const { data, err } = usePoll(api.dashboard, 10000);
-  const [scale, setScale] = React.useState(1);
-  React.useEffect(() => {
-    const f = () => setScale(Math.min(innerWidth / 1920, innerHeight / 1080));
-    f(); addEventListener('resize', f);
-    return () => removeEventListener('resize', f);
-  }, []);
 
   const [now, setNow] = React.useState(new Date());
   React.useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
@@ -52,8 +46,8 @@ export default function Dashboard() {
   }, [data]);
 
   return (
-    <div style={{ width: '100vw', height: '100vh', background: 'var(--bg-page)', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ width: 1920, height: 1080, transform: `scale(${scale})`, transformOrigin: 'center', display: 'flex', flexDirection: 'column', padding: '20px 28px', gap: 14 }}>
+    <div style={{ width: '100vw', height: '100vh', background: 'var(--bg-page)', overflow: 'hidden', display: 'flex', flexDirection: 'column', padding: '14px clamp(16px, 2vw, 40px)', gap: 14 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 14, minHeight: 0, minWidth: 0 }}>
         {/* 大屏标题栏 */}
         <div style={{ display: 'flex', alignItems: 'center', height: 56, borderBottom: '1px solid var(--hairline)' }}>
           <a href="#/server" style={{ color: 'var(--text-3)', textDecoration: 'none', fontSize: 13 }}>← 控制台</a>
@@ -110,7 +104,7 @@ export default function Dashboard() {
           </div>
 
           {/* 中部三栏 */}
-          <div style={{ display: 'grid', gridTemplateColumns: '460px 1fr 460px', gap: 14, flex: 1, minHeight: 0 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'clamp(260px, 26%, 500px) minmax(0, 1fr) clamp(260px, 26%, 500px)', gap: 14, flex: 1, minHeight: 0 }}>
             {/* 左：四域健康 */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {data.domains.map((d: any) => (
@@ -138,9 +132,11 @@ export default function Dashboard() {
 
             {/* 中：24h 告警趋势 + TOP */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
-              <div className="card" style={{ flex: 1.2, minHeight: 0 }}>
+              <div className="card" style={{ flex: 1.2, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                 <div className="card-title">近 24 小时告警趋势</div>
-                <Chart option={option} height={250} />
+                <div style={{ flex: 1, minHeight: 80 }}>
+                  <Chart option={option} height="100%" />
+                </div>
               </div>
               <div className="grid-2" style={{ flex: 1 }}>
                 <div className="card">

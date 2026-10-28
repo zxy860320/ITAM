@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>网络拓扑 PoC — 局部真实链路视图（ELK 分层布局）</title>
+<link rel="stylesheet" href="./app.css"/>
+</head>
+<body>
+<header>
+  <h1>网络拓扑（PoC · 局部真实链路）
+    <span class="tag live" id="srcTag">数据源：生产 topology.db（只读快照）</span>
+    <span class="tag" id="focusTag">聚焦：—</span>
+    <span class="tag" id="layerTag">布局：ELK layered · 正交连线</span>
+  </h1>
+  <div class="toolbar">
+    <input type="search" id="search" placeholder="搜索设备（名称 / IP）→ 点击聚焦" autocomplete="off"/>
+    <div class="searchlist" id="searchList" style="display:none"></div>
+    <div class="seg" id="hopSeg">
+      <button data-h="1" class="on">一跳邻居</button>
+      <button data-h="2">两跳邻居</button>
+    </div>
+    <button class="btn" id="fitBtn">适应画布</button>
+    <button class="btn" id="relayoutBtn">重新自动布局</button>
+    <button class="btn" id="saveBtn">保存布局</button>
+    <button class="btn" id="clearPosBtn">清除保存位置</button>
+    <button class="btn primary" id="fullBtn">全屏</button>
+    <span style="font-size:11px;color:var(--text-3)">聚焦设备：<b class="mono" id="focusId"></b></span>
+  </div>
+</header>
+<main>
+  <div id="canvasWrap">
+    <svg id="svg"><g id="viewport"></g></svg>
+    <div class="legend">
+      <div class="row"><span class="swatch" style="border-top:2px solid var(--ok)"></span>已确认链路（双端校验）</div>
+      <div class="row"><span class="swatch dash" style="border-top:2px dashed var(--warn)"></span>单端发现（half）· 待确认</div>
+      <div class="row"><span class="swatch box" style="background:var(--bg-card);border:1px solid var(--hairline)"></span>纳管设备（卡片）</div>
+      <div class="row"><span class="swatch box" style="border:1px dashed var(--ext);background:rgba(179,136,255,.06)"></span>未纳管对端（仅 LLDP 快照）</div>
+    </div>
+    <div class="hint">滚轮缩放 · 拖动画布平移 · 拖动卡片调整位置后可保存 · 点设备看上下游 · 点连线看 LLDP 证据</div>
+  </div>
+  <aside>
+    <div class="tabs">
+      <button data-t="detail" class="on">详情</button>
+      <button data-t="neighbors">邻居展开</button>
+      <button data-t="unlinked">未关联设备</button>
+    </div>
+    <div id="panelBody"></div>
+  </aside>
+</main>
+<footer id="foot"></footer>
+<script src="./elk.bundled.js"></script>
+<script src="./data.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>

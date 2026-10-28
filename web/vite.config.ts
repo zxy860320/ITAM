@@ -6,6 +6,9 @@ export default defineConfig({
   server: {
     port: 5273,
     strictPort: true,
-    proxy: { '/api': 'http://127.0.0.1:8787' },
+    proxy: {
+      '/api': 'http://127.0.0.1:8787',
+      '/topo-api': { target: 'http://127.0.0.1:8790', rewrite: p => p.replace(/^\/topo-api/, '/api') },
+    },
   },
 });

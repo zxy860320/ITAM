@@ -31,8 +31,16 @@ const GROUP_HINTS = [
 // —— 真实指标 item key（跨模板族候选，取最新值）——
 // filter 是精确匹配，故用 search 通配 + 代码端精确/前缀过滤兜底
 const CPU_KEYS = ['system.cpu.util', 'hwCPUUsage', 'hrProcessorLoad', 'hwEntityCPUUtilization'];
+// 陷阱：system.cpu.util 的"分量细分"变体（[,idle]/[,user]/[,iowait]…）参数以逗号开头，
+// idle=空闲时间≠使用率。search 部分匹配会把它们全带回来，Math.max 后 idle(99.5%) 冒充 CPU 使用率。
+// 汇总使用率取不带逗号参数的 key（system.cpu.util / system.cpu.util[多核变体]）。
+const CPU_COMPONENT_RE = /^system\.cpu\.util\[,/;
 const MEM_KEYS = ['vm.memory.util', 'hrMemoryLoad'];
-const DISK_KEYS = ['vfs.fs.size[/,pused]', 'vfs.fs.size[c:\\,pused]'];
+// 陷阱：Zabbix 7.x 新版 Linux agent 模板把文件系统项改为依赖项 vfs.fs.dependent.size[/,pused]
+// （旧模板才是 vfs.fs.size[/,pused]），旧 DISK_KEYS 精确匹配带不上 → 概览"磁盘使用"显示"—"。
+// 正则兼容两代 key；根分区（/ 或 c:\）优先，没有根分区时取所有挂载点最大值（最差分区）。
+const DISK_RE = /^vfs\.fs\.(?:dependent\.)?size\[[^\]]+,pused\]$/;
+const DISK_ROOT_RE = /^vfs\.fs\.(?:dependent\.)?size\[\/,pused\]$|^vfs\.fs\.(?:dependent\.)?size\[c:\\,pused\]$/i;
 const UPTIME_KEYS = ['system.uptime'];
 // 设备摘要类 item（列表同步顺带取，点开详情再拉全量）
 const INFO_KEYS = ['system.hw.model', 'system.sw.os', 'system.location', 'sensor.temp.value', 'icmpping'];
@@ -105,7 +113,7 @@ export class ZabbixCollector {
             output: 'extend',
             state: 0,
             status: 0,
-            search: { key_: [...CPU_KEYS, ...MEM_KEYS, ...DISK_KEYS, ...UPTIME_KEYS] },
+            search: { key_: [...CPU_KEYS, ...MEM_KEYS, 'vfs.fs.size', 'vfs.fs.dependent.size', ...UPTIME_KEYS] },
             searchByAny: true,
           }),
           // 设备摘要：型号/软件版本/位置/温度/ICMP 可达 —— 点开前列表就能展示
@@ -171,9 +179,10 @@ export class ZabbixCollector {
       const v = Number(it.lastvalue);
       if (!Number.isFinite(v)) continue;
       const k = it.key_;
-      if (CPU_KEYS.some(x => k === x || k.startsWith(x + '['))) rec.cpu = Math.max(rec.cpu ?? -1, v);
+      if (CPU_COMPONENT_RE.test(k)) continue; // 跳过 [,idle]/[,user] 等分量项（手册 §7.4 坑：idle≠使用率）
+      else if (CPU_KEYS.some(x => k === x || k.startsWith(x + '['))) rec.cpu = Math.max(rec.cpu ?? -1, v);
       else if (MEM_KEYS.some(x => k === x || k.startsWith(x + '['))) rec.mem = Math.max(rec.mem ?? -1, v);
-      else if (DISK_KEYS.some(x => k === x || k.startsWith(x + '['))) rec.disk = Math.max(rec.disk ?? -1, v);
+      else if (DISK_RE.test(k)) { if (DISK_ROOT_RE.test(k)) rec.diskRoot = Math.max(rec.diskRoot ?? -1, v); else rec.diskMax = Math.max(rec.diskMax ?? -1, v); }
       else if (UPTIME_KEYS.some(x => k === x || k.startsWith(x + '['))) rec.uptime = v;
     }
 
@@ -220,7 +229,7 @@ export class ZabbixCollector {
         availability: 'healthy',
         cpu: m.cpu != null ? +m.cpu.toFixed(1) : null,
         mem: m.mem != null ? +m.mem.toFixed(1) : null,
-        disk: m.disk != null ? +m.disk.toFixed(1) : null,
+        disk: (() => { const d = m.diskRoot ?? m.diskMax; return d != null ? +d.toFixed(1) : null; })(),
         uptimeDays: m.uptime ? Math.floor(m.uptime / 86400) : null,
         items: 0, problems: 0,
         // 摘要扩展（列表即可见）：ICMP 可达 + 设备档案
@@ -305,7 +314,10 @@ export class ZabbixCollector {
     for (const it of items) (byKey[num(it.key_)] = byKey[num(it.key_)] || []).push(it);
     const pick = keys => {
       for (const k of keys) {
-        const hit2 = (byKey[k] || []).find(i => Number(i.lastclock) && Number.isFinite(+i.lastvalue));
+        const arr = byKey[k] || [];
+        // 优先非分量变体（避开 system.cpu.util[,idle]），找不到再回退首个有效项
+        const hit2 = arr.find(i => !CPU_COMPONENT_RE.test(i.key_) && Number(i.lastclock) && Number.isFinite(+i.lastvalue))
+          || arr.find(i => Number(i.lastclock) && Number.isFinite(+i.lastvalue));
         if (hit2) return hit2;
       }
       return null;
@@ -323,10 +335,12 @@ export class ZabbixCollector {
         }).catch(() => [])
       : [];
 
-    // —— 网络接口聚合：兼容两种 key 格式 ——
-    //   SNMP: net.if.in[ifHCInOctets.1]      → 名称从 item name "Interface xxx(...): field" 提取
-    //   Agent: net.if.in["enp4s1",errors]    → 名称取引号里的接口名
-    const IFRE = /^net\.if\.(in|out|status|speed|type|duplex)(?:\.(errors|discards))?\[([^\]]+)\]$/;
+    // —— 网络接口聚合：兼容三种 key 形态 ——
+    //   SNMP:  net.if.in[ifHCInOctets.1]          → 名称从 item name "Interface xxx(...): field" 提取
+    //   Agent: net.if.in["enp4s1"]                → 名称取引号里的接口名
+    //   变体（点式或逗号）: net.if.in.errors[k] / net.if.in["eth0",errors] / net.if.in[ifHCInOctets.10,dropped]
+    //   ⚠ 逗号变体若不识别会被当主项，errors=0 覆盖真实 bps 现值（显示"—"的根因）
+    const IFRE = /^net\.if\.(in|out|status|speed|type|duplex)(?:\.(errors|discards))?\[([^\]]+?)(?:,(errors|discards|dropped))?\]$/;
     const ifcMap = new Map();
     for (const it of items) {
       const m = IFRE.exec(it.key_);
@@ -343,14 +357,14 @@ export class ZabbixCollector {
       }
       const rec = ifcMap.get(idx) || { name: '', status: null, speed: null, in: null, out: null, inErr: 0, outErr: 0, inDsc: 0, outDsc: 0 };
       if (!rec.name || rec.name.startsWith('if#')) rec.name = nm;
-      const [base, sub] = [m[1], m[2]];
+      const [base, sub] = [m[1], m[2] || m[4]];
       const v = it.lastvalue;
       if (base === 'status') rec.status = +v;              // 1=up 2=down
       else if (base === 'speed') rec.speed = +v;
       else if (base === 'in' && !sub) rec.in = +v;
       else if (base === 'out' && !sub) rec.out = +v;
       else if (sub === 'errors') { if (base === 'in') rec.inErr = +v; else rec.outErr = +v; }
-      else if (sub === 'discards') { if (base === 'in') rec.inDsc = +v; else rec.outDsc = +v; }
+      else if (sub === 'discards' || sub === 'dropped') { if (base === 'in') rec.inDsc = +v; else rec.outDsc = +v; }
       ifcMap.set(idx, rec);
     }
     const netIfs = [...ifcMap.values()].filter(x => x.name && !x.name.startsWith('if#'))
@@ -411,7 +425,7 @@ export class ZabbixCollector {
    * till = 窗口结束锚点（epoch 秒，0=现在），用于回看过去某个时间段。
    * 一次返回该设备全部可用指标（cpu/mem/temp/load/proc/fs/ping + 选定接口的流量）。
    */
-  async series(hostid, range = '6h', till = 0, iface = '') {
+  async series(hostid, range = '6h', till = 0, iface = '', dev = '', mnt = '') {
     if (this.mode !== 'zabbix') return null;
     const SPAN = { '6h': 6 * 3600, '24h': 24 * 3600, '7d': 7 * 86400, '30d': 30 * 86400 };
     const span = SPAN[range] || SPAN['6h'];
@@ -420,13 +434,14 @@ export class ZabbixCollector {
     const t1 = t2 - span;
 
     const cache = (this._seriesCache = this._seriesCache || new Map());
-    const ck = `${hostid}|${range}|${t2}|${iface}`;
+    const ck = `${hostid}|${range}|${t2}|${iface}|${dev}|${mnt}`;
     const hit = cache.get(ck);
     if (hit && Date.now() - hit.at < (span > 86400 ? 300e3 : 60e3)) return hit.data;
 
     const searchKeys = ['system.cpu.util', 'hwCPUUsage', 'hrProcessorLoad', 'hwEntityCPUUtilization',
       'vm.memory.util', 'hrMemoryLoad', 'vm.memory.size', 'icmppingsec', 'sensor.temp.value',
-      'system.cpu.load', 'proc.num', 'vfs.fs', 'net.if.in', 'net.if.out'];
+      'system.cpu.load', 'proc.num', 'vfs.fs', 'net.if.in', 'net.if.out',
+      'vfs.dev.read.rate', 'vfs.dev.write.rate'];
     const num = k => k.split('[')[0];
     const items = await this.rpc('item.get', {
       output: ['itemid', 'key_', 'name', 'lastclock', 'lastvalue', 'value_type', 'history', 'trends', 'units'],
@@ -465,6 +480,45 @@ export class ZabbixCollector {
           - (Math.abs(+a.in.lastvalue) + Math.abs(+a.out.lastvalue)))[0] || null;
     }
 
+    // —— 磁盘 I/O 设备清单（vfs.dev.read.rate[dev] / vfs.dev.write.rate[dev]，读写同参天然配对）——
+    // Linux 模板提供 r/s、w/s（IOPS）；网络设备等无此类 item → 前端自动隐藏该指标卡
+    const devMap = {};
+    for (const it of items) {
+      const m = it.key_.match(/^vfs\.dev\.(read|write)\.rate\[([^\]]+)\]$/);
+      if (!m) continue;
+      const rec = (devMap[m[2]] = devMap[m[2]] || { dev: m[2], read: null, write: null });
+      if (m[1] === 'read') rec.read = it; else rec.write = it;
+    }
+    const liveDevs = Object.values(devMap).filter(x => x.read && x.write && (Number(x.read.lastclock) || Number(x.write.lastclock)));
+    const devs = liveDevs
+      .map(x => ({ dev: x.dev, act: Math.abs(+x.read.lastvalue || 0) + Math.abs(+x.write.lastvalue || 0) }))
+      .sort((a, b) => (b.act > 0 ? 1 : 0) - (a.act > 0 ? 1 : 0)
+        || a.dev.localeCompare(b.dev, 'en', { numeric: true }))
+      .map(x => ({ dev: x.dev }));
+    let devRec = dev ? devMap[dev] : null;
+    if (!dev && liveDevs.length) {
+      devRec = liveDevs
+        .sort((a, b) => (Math.abs(+b.read.lastvalue || 0) + Math.abs(+b.write.lastvalue || 0))
+          - (Math.abs(+a.read.lastvalue || 0) + Math.abs(+a.write.lastvalue || 0)))[0] || null;
+    }
+
+    // —— 磁盘分区清单（vfs.fs[.dependent].size[挂载点,pused]，% 单位；两代模板 key 都认）——
+    const FS_PUSED_RE = /^vfs\.fs\.(?:dependent\.)?size\[([^\]]+),pused\]$/;
+    const isRootMnt = m => m === '/' || /^c:\\$/i.test(m);
+    const mntMap = {};
+    for (const it of items) {
+      const m = it.key_.match(FS_PUSED_RE);
+      if (!m || it.units !== '%') continue;
+      const key = m[1].replace(/^"|"$/g, '');
+      if (!mntMap[key] || Number(it.lastclock) > Number(mntMap[key].it.lastclock)) mntMap[key] = { mnt: key, label: (it.name || key).replace(/^FS \[(.*)\]:\s*/, ''), it };
+    }
+    const mnts = Object.values(mntMap)
+      .filter(x => Number(x.it.lastclock))
+      .sort((a, b) => (isRootMnt(b.mnt) - isRootMnt(a.mnt))
+        || (Number(b.it.lastvalue || 0) - Number(a.it.lastvalue || 0))
+        || a.mnt.localeCompare(b.mnt))
+      .map(x => ({ mnt: x.mnt, label: x.label, cur: +(+x.it.lastvalue || 0).toFixed(1) }));
+
     const byKey = {};
     for (const it of items) (byKey[num(it.key_)] = byKey[num(it.key_)] || []).push(it);
     const live = arr => arr.filter(i => Number(i.lastclock));
@@ -478,16 +532,20 @@ export class ZabbixCollector {
       return null;
     };
     const chosen = {
-      cpu: pick(['system.cpu.util', 'hwCPUUsage', 'hrProcessorLoad', 'hwEntityCPUUtilization']),
+      // cpu 优先非分量变体（避开 system.cpu.util[,idle] 等，pref 找不到时仍回退首个）
+      cpu: pick(['system.cpu.util', 'hwCPUUsage', 'hrProcessorLoad', 'hwEntityCPUUtilization'], i => !CPU_COMPONENT_RE.test(i.key_)),
       mem: pick(['vm.memory.util', 'hrMemoryLoad']),
       temp: pick(['sensor.temp.value']),
       load: pick(['system.cpu.load'], i => i.key_.includes('avg5')),
       proc: pick(['proc.num'], i => i.key_ === 'proc.num'),
-      fs: pick(['vfs.fs.size', 'vfs.fs.dependent.size'], i => i.key_.includes('pused') && i.units === '%'),
+      // fs：指定挂载点优先（mnt 参数）；否则根分区优先、再退 pused 首个
+      fs: (mnt && mntMap[mnt]?.it) || pick(['vfs.fs.size', 'vfs.fs.dependent.size'], i => i.key_.includes('pused') && i.units === '%' && (isRootMnt((i.key_.match(FS_PUSED_RE) || [])[1] || '')))
+        || pick(['vfs.fs.size', 'vfs.fs.dependent.size'], i => i.key_.includes('pused') && i.units === '%'),
       ping: pick(['icmppingsec']),
     };
     const tIn = ifaceRec?.in || null, tOut = ifaceRec?.out || null;
-    const all = [...Object.values(chosen), tIn, tOut].filter(Boolean);
+    const dR = devRec?.read || null, dW = devRec?.write || null;
+    const all = [...Object.values(chosen), tIn, tOut, dR, dW].filter(Boolean);
 
     let grain = 'raw', mk = null;
     if (!all.length) {
@@ -520,7 +578,7 @@ export class ZabbixCollector {
           output: ['itemid', 'clock', 'value'],
           history: +vt, itemids: its.map(i => i.itemid),
           time_from: t1, time_till: t2,
-          sortfield: 'clock', sortorder: 'ASC', limit: 16000,
+          sortfield: 'clock', sortorder: 'ASC', limit: 20000,
         }).catch(() => [])
       ))).flat();
       mk = it => it
@@ -532,6 +590,7 @@ export class ZabbixCollector {
       cpu: mk(chosen.cpu), mem: mk(chosen.mem), temp: mk(chosen.temp),
       load: mk(chosen.load), proc: mk(chosen.proc), fs: mk(chosen.fs), ping: mk(chosen.ping),
       traffic: { iface: ifaceRec?.iface || '', label: ifaceRec?.label || '', in: mk(tIn), out: mk(tOut) },
+      dio: { dev: devRec?.dev || '', read: mk(dR), write: mk(dW) },
     };
     const refIt = chosen.cpu || chosen.mem || chosen.temp || chosen.ping || tIn;
     const data = {
@@ -539,13 +598,17 @@ export class ZabbixCollector {
       grain,
       points: ['cpu', 'mem', 'temp', 'load', 'proc', 'fs', 'ping']
         .reduce((n, k) => n + (series[k]?.avg?.length || 0), 0)
-        + (series.traffic.in.avg?.length || 0) + (series.traffic.out.avg?.length || 0),
+        + (series.traffic.in.avg?.length || 0) + (series.traffic.out.avg?.length || 0)
+        + (series.dio.read.avg?.length || 0) + (series.dio.write.avg?.length || 0),
       retention: { history: refIt?.history || '', trends: refIt?.trends || '' },
       meta: {
-        fs: { label: chosen.fs?.name || '磁盘使用', units: chosen.fs?.units || '' },
+        fs: { label: chosen.fs?.name || '磁盘使用', units: chosen.fs?.units || '', mnt: chosen.fs ? ((chosen.fs.key_.match(FS_PUSED_RE) || [])[1] || '').replace(/^"|"$/g, '') : '' },
         traffic: { units: 'bps' },
+        dio: { units: 'ops/s' },
       },
       ifaces: ifaces.slice(0, 24),
+      devs: devs.slice(0, 16),
+      mnts: mnts.slice(0, 16),
       series,
     };
     cache.set(ck, { at: Date.now(), data });
