@@ -20,7 +20,7 @@ export function isMgmtIface(name) { return MGMT_IFACE_RE.test(String(name || '')
  *   decay 只作用于端点落在该集合内的链路——部分节点发现轮绝不误伤未参与节点的链路（P2-M1 修正）。
  * 返回 {new, updated, half, confirmed, conflict, observed_ifaces}
  */
-export function applyObservations(db, source, observations, runTs, observedNodes = null) {
+export async function applyObservations(db, source, observations, runTs, observedNodes = null) {
   const stat = { new: 0, updated: 0, half: 0, confirmed: 0, conflict: 0, observed_ifaces: new Set() };
   const getNode = db.prepare('SELECT node_id, display_name FROM topology_node WHERE zbx_hostid=?');
   const findNodeBySys = db.prepare(`SELECT node_id FROM topology_node
@@ -38,16 +38,16 @@ export function applyObservations(db, source, observations, runTs, observedNodes
     last_seen=?, missing_rounds=0, b_snapshot=COALESCE(?,b_snapshot) WHERE link_id=?`);
 
   for (const ob of observations) {
-    const node = getNode.get(ob.hostid);
+    const node = await getNode.get(ob.hostid);
     if (!node) continue;
     const { parsed, ts } = ob;
     // chassis_id 补全（本端 walk 常缺 .3.0，用邻居处看到的 chassis 反填）
-    if (parsed.chassis_id) setChassis.run(parsed.chassis_id, node.node_id, parsed.chassis_id);
+    if (parsed.chassis_id) await setChassis.run(parsed.chassis_id, node.node_id, parsed.chassis_id);
 
     // 本端端口定位：lldpLocPortNum → locPorts[pn].port_id / port_desc → topology_interface
     for (const rem of parsed.rem) {
       const lp = parsed.locPorts[rem.port_num] || parsed.locPorts[String(rem.port_num)] || {};
-      const aIface = findIface.get(node.node_id, lp.port_id || '', lp.port_desc || '');
+      const aIface = await findIface.get(node.node_id, lp.port_id || '', lp.port_desc || '');
       if (!aIface) continue; // 本端端口不在接口清单（聚合口/未纳管口），只留记录
       // 管理口守卫（用户规则 2026-10-26）：本端经 MEth 等管理口学到的邻居是带外管理网连接，不建链
       if (isMgmtIface(aIface.if_name)) continue;
@@ -55,22 +55,22 @@ export function applyObservations(db, source, observations, runTs, observedNodes
       if (isMgmtIface(rem.port_id) || isMgmtIface(rem.port_desc)) continue;
       const nkey = neighborKey(rem);
       let bNodeId = null, bMatch = null;
-      if (rem.chassis_id) { const r = findNodeByCid.get(normId(rem.chassis_id)); if (r) { bNodeId = r.node_id; bMatch = 'cid'; } }
+      if (rem.chassis_id) { const r = await findNodeByCid.get(normId(rem.chassis_id)); if (r) { bNodeId = r.node_id; bMatch = 'cid'; } }
       if (!bNodeId && rem.sys_name) {
-        const r = findNodeBySys.get(rem.sys_name.toLowerCase(), rem.sys_name.toLowerCase(), rem.sys_name);
+        const r = await findNodeBySys.get(rem.sys_name.toLowerCase(), rem.sys_name.toLowerCase(), rem.sys_name);
         if (r && r.node_id !== node.node_id) { bNodeId = r.node_id; bMatch = 'sys'; }
       }
       // 自环守卫：邻居身份解析回本节点（堆叠 IRF/自身回指，实测 S5590 有 4 行）→ 不建链路，只留发现记录
       if (bNodeId === node.node_id) continue;
       // 用邻居观察反填对端 chassis_id，提高下轮 cid 匹配率
-      if (bNodeId && rem.chassis_id) setChassis.run(normId(rem.chassis_id), bNodeId, normId(rem.chassis_id));
+      if (bNodeId && rem.chassis_id) await setChassis.run(normId(rem.chassis_id), bNodeId, normId(rem.chassis_id));
 
       // 对端端口解析（能解析则建全链路，不能则 half + snapshot）
       let bIface = null;
       if (bNodeId) {
-        const r = findIface.get(bNodeId, normId(rem.port_id), rem.port_desc || '');
+        const r = await findIface.get(bNodeId, normId(rem.port_id), rem.port_desc || '');
         if (r) bIface = r.interface_id;
-        else { const r2 = findIfaceByName.get(bNodeId, normId(rem.port_id)); if (r2) bIface = r2.interface_id; }
+        else { const r2 = await findIfaceByName.get(bNodeId, normId(rem.port_id)); if (r2) bIface = r2.interface_id; }
       }
       const snapshot = { sys_name: rem.sys_name, port_id: rem.port_id, port_desc: rem.port_desc, chassis_id: rem.chassis_id };
 
@@ -86,7 +86,7 @@ export function applyObservations(db, source, observations, runTs, observedNodes
       }
       stat.observed_ifaces.add(normKey);
       const conf = bIface ? 1.0 : bMatch === 'cid' ? 0.7 : bMatch === 'sys' ? 0.4 : 0.3;
-      const existing = getLink.get(normKey);
+      const existing = await getLink.get(normKey);
       const tsA = aIsA ? ts : null, tsB = aIsA ? null : ts;
       if (existing) {
         let status = existing.status;
@@ -95,13 +95,13 @@ export function applyObservations(db, source, observations, runTs, observedNodes
         else if (status !== 'manual' && status !== 'confirmed' && status !== 'rejected') status = 'half';
         if (status === 'confirmed' && existing.status !== 'confirmed') stat.confirmed++;
         if (status === 'half' && existing.status !== 'half') stat.half++;
-        updLink.run(status, Math.max(conf, existing.confidence || 0), sA, sB, ts,
+        await updLink.run(status, Math.max(conf, existing.confidence || 0), sA, sB, ts,
           bIface ? null : JSON.stringify(snapshot), existing.link_id);
         stat.updated++;
       } else {
         const status = 'half'; // 单轮只见单方向；双端确认走上面的 existing 分支
-        if (bIface) insLink.run(normKey, pair[0][0], pair[0][1], pair[1][0], pair[1][1], JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
-        else insLink.run(normKey, node.node_id, aIface.interface_id, bNodeId, null, JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
+        if (bIface) await insLink.run(normKey, pair[0][0], pair[0][1], pair[1][0], pair[1][1], JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
+        else await insLink.run(normKey, node.node_id, aIface.interface_id, bNodeId, null, JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
         stat.new++;
         if (status === 'half') stat.half++;
       }
@@ -124,7 +124,7 @@ export function applyObservations(db, source, observations, runTs, observedNodes
   }
   // 注意3：seenList 是数组（用 .length）——曾误写 .size（Set 属性）恒为 undefined，
   // 导致不传 observedNodes 的调用 decay 永不执行（自测暴露，2026-10-26 修复）
-  if (seenList.length || (observedNodes && observedNodes.size)) db.prepare(decaySql).run(...decayArgs);
+  if (seenList.length || (observedNodes && observedNodes.size)) await db.prepare(decaySql).run(...decayArgs);
   stat.observed_ifaces = stat.observed_ifaces.size;
   return stat;
 }
@@ -152,9 +152,9 @@ export async function runDiscovery(db, zbx, cfg, { nodeIds = null, batchSize = 2
     const conds = [], args = [];
     if (strs.length) { conds.push(`zbx_hostid IN (${strs.map(() => '?').join(',')})`); args.push(...strs); }
     if (ints.length) { conds.push(`node_id IN (${ints.map(() => '?').join(',')})`); args.push(...ints); }
-    targetNodes = db.prepare(`SELECT zbx_hostid, node_id, vendor FROM topology_node WHERE status<>'stale' AND (${conds.join(' OR ')})`).all(...args);
+    targetNodes = await db.prepare(`SELECT zbx_hostid, node_id, vendor FROM topology_node WHERE status<>'stale' AND (${conds.join(' OR ')})`).all(...args);
   } else {
-    targetNodes = db.prepare("SELECT zbx_hostid, node_id, vendor FROM topology_node WHERE status<>'stale'").all();
+    targetNodes = await db.prepare("SELECT zbx_hostid, node_id, vendor FROM topology_node WHERE status<>'stale'").all();
   }
   const hostids = targetNodes.map(r => r.zbx_hostid).filter(Boolean);
   const vendorOf = new Map(targetNodes.map(r => [r.zbx_hostid, (r.vendor || '').toLowerCase()]));
@@ -184,7 +184,7 @@ export async function runDiscovery(db, zbx, cfg, { nodeIds = null, batchSize = 2
       const ifList = byHost[hid] || [];
       const startedAt = Math.floor(Date.now() / 1000);
       if (!ifList.length) {
-        insRec.run(runId, ifaceOf.get(hid)?.node_id ?? null, 'zbx_walk_probe', null, 'no_iface', 0, 'no SNMP interface', startedAt, Math.floor(Date.now() / 1000));
+        await insRec.run(runId, (await ifaceOf.get(hid))?.node_id ?? null, 'zbx_walk_probe', null, 'no_iface', 0, 'no SNMP interface', startedAt, Math.floor(Date.now() / 1000));
         tally('no_iface');
         continue;
       }
@@ -197,14 +197,14 @@ export async function runDiscovery(db, zbx, cfg, { nodeIds = null, batchSize = 2
         if (itemid) created.push({ hostid: hid, itemid, startedAt });
         else throw new Error('item.create no id');
       } catch (e) {
-        insRec.run(runId, ifaceOf.get(hid)?.node_id ?? null, 'zbx_walk_probe', null, 'snmp_timeout', 0, String(e.message).slice(0, 400), startedAt, Math.floor(Date.now() / 1000));
+        await insRec.run(runId, (await ifaceOf.get(hid))?.node_id ?? null, 'zbx_walk_probe', null, 'snmp_timeout', 0, String(e.message).slice(0, 400), startedAt, Math.floor(Date.now() / 1000));
         tally('snmp_timeout');
       }
     }
     log(`run ${runId}: 批次 ${i / batchSize + 1} 创建 ${created.length} 项，等待 ${Math.round(waitMs / 1000)}s`);
     if (created.length) await new Promise(r => setTimeout(r, waitMs));
     for (const c of created) {
-      const nodeId = ifaceOf.get(c.hostid)?.node_id ?? null;
+      const nodeId = (await ifaceOf.get(c.hostid))?.node_id ?? null;
       let result = 'walk_empty', snap = null, n = 0, err = null;
       // itemerror 判定（history 无数据时区分"设备不可达"与"表空"）
       let itemErr = '';
@@ -236,7 +236,7 @@ export async function runDiscovery(db, zbx, cfg, { nodeIds = null, batchSize = 2
           if (itemErr) err = itemErr.slice(0, 400);
         }
       } catch (e) { err = String(e.message).slice(0, 400); result = 'parse_error'; }
-      insRec.run(runId, nodeId, 'zbx_walk_probe', snap, result, n, err, c.startedAt, Math.floor(Date.now() / 1000));
+      await insRec.run(runId, nodeId, 'zbx_walk_probe', snap, result, n, err, c.startedAt, Math.floor(Date.now() / 1000));
       tally(result);
     }
     // 用后即删（幂等清理）
@@ -244,7 +244,7 @@ export async function runDiscovery(db, zbx, cfg, { nodeIds = null, batchSize = 2
     if (ids.length) { try { await zbx.deleteItems(ids); } catch (e) { log(`cleanup warn: ${e.message}`); } }
   }
 
-  const linkStat = applyObservations(db, 'lldp_zbx', allObs, runTs, observedNodes);
+  const linkStat = await applyObservations(db, 'lldp_zbx', allObs, runTs, observedNodes);
   return { runId, nodes: hostids.length, ...batchSummary, links: linkStat };
 }
 

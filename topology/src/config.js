@@ -1,4 +1,6 @@
 // topology-svc 配置：Zabbix 凭据复用 P0 的 server/data/source.json（只读，不写入）
+// 存储引擎：TOPO_DB=mysql → MySQL（MYSQL_HOST/PORT/USER/PASSWORD/DATABASE）；
+// 否则 TOPO_DB 视为 sqlite 文件路径（缺省 topology/data/topology.db，本地开发默认）。
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,7 +17,15 @@ try {
 
 export const CFG = {
   port: Number(process.env.TOPO_PORT || 8790),
+  dbKind: String(process.env.TOPO_DB || '').toLowerCase() === 'mysql' ? 'mysql' : 'sqlite',
   dbFile: process.env.TOPO_DB || path.join(ROOT, 'topology', 'data', 'topology.db'),
+  mysql: {
+    host: process.env.MYSQL_HOST || '127.0.0.1',
+    port: Number(process.env.MYSQL_PORT || 3306),
+    user: process.env.MYSQL_USER || 'topology',
+    password: process.env.MYSQL_PASSWORD || '',
+    database: process.env.MYSQL_DATABASE || 'ityw_topology',
+  },
   zbx,
   // LLDP 临时采样 walk 的 OID 集（P2-M1 修正 2026-10-25：v1 中 5/7 OID 无效——
   // 标量实例应是 .3.1.0/.3.2.0（v1 的 .3.0 不存在）；rem 列缺 Entry 层，正确为 .4.1.1.<col>。

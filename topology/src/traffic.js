@@ -26,12 +26,12 @@ export async function itemSeries(zbx, itemid, range, till = 0) {
   return { grain: 'raw', avg: rows.map(r => ({ t: +r.clock * 1000, v: +(+r.value).toFixed(2) })) };
 }
 
-export function getIfaceMappings(db, ifaceId) {
+export async function getIfaceMappings(db, ifaceId) {
   return db.prepare('SELECT metric, zbx_itemid, stale FROM topology_metric_mapping WHERE interface_id=?').all(ifaceId);
 }
 
 export async function ifaceTraffic(zbx, db, ifaceId, range, till) {
-  const maps = getIfaceMappings(db, ifaceId);
+  const maps = await getIfaceMappings(db, ifaceId);
   const out = { units: 'bps', stale_mapping: maps.some(m => m.stale) };
   for (const metric of ['if_in', 'if_out']) {
     const m = maps.find(x => x.metric === metric);

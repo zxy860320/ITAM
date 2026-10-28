@@ -1,0 +1,100 @@
+# ITYW 一键部署：mysql + ityw-server(:8787) + topology-svc(:8790, MySQL 引擎) + web(nginx :80)
+# 使用前：cp .env.example .env 并修改密码；准备 server/data/source.json（Zabbix 凭据，见 docs/DEPLOY-DOCKER.md）
+name: ityw
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQ...OT}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
+      MYSQL_USER: ${MYSQL_USER:-topology}
+      MYSQL_PASSWORD: ${MYSQ...WORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    # 数据库仅供容器内访问，不映射宿主机端口；调试需要时取消注释：
+    # ports:
+    #   - "127.0.0.1:3306:3306"
+
+  server:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    environment:
+      PORT: "8787"
+    volumes:
+      # source.json / notify.json / notify_state.json / dbmp_samples.json 持久化
+      - ./server/data:/app/server/data
+    # 仅 web(nginx) 经内部网络访问；调试需要时取消注释：
+    # ports:
+    #   - "127.0.0.1:8787:8787"
+
+  topology:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.topology
+    image: ityw-topology:latest
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      TOPO_PORT: "8790"
+      TOPO_DB: mysql
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER:-topology}
+      MYSQL_PASSWORD: ${MYSQ...WORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
+      ZBX_SOURCE_CFG: /app/config/source.json
+    volumes:
+      # 只读复用 P0 的 Zabbix 凭据文件（topology-svc 从不写它）
+      - ./server/data/source.json:/app/config/source.json:ro
+    # ports:
+    #   - "127.0.0.1:8790:8790"
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      - server
+      - topology
+    ports:
+      - "${WEB_PORT:-80}:80"
+
+  # 一次性数据迁移（sqlite → MySQL）：
+  #   先 docker compose build topology，再
+  #   docker compose --profile tools run --rm migrate
+  # 迁移源 = ./topology/data/topology.db（只读挂载），凭据走 .env 的 MYSQL_*
+  migrate:
+    image: ityw-topology:latest
+    profiles: ["tools"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["node", "topology/scripts/migrate-sqlite-to-mysql.mjs"]
+    environment:
+      TOPO_SQLITE: /data/topology.db
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER:-topology}
+      MYSQL_PASSWORD: ${MYSQ...WORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
+    volumes:
+      - ./topology/data/topology.db:/data/topology.db:ro
+
+volumes:
+  mysql_data:

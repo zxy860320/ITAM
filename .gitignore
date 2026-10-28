@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .workbuddy/
+# docker-compose 部署凭据（由 .env.example 复制），切勿入库
+.env
 .ai-memory/
 output/
 *.log

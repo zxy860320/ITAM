@@ -1,0 +1,25 @@
+# ITYW P1 拓扑服务（:8790）——Express + node:sqlite/MySQL 双引擎（TOPO_DB=mysql 时走 MySQL）
+# 构建上下文 = 仓库根：docker build -f deploy/Dockerfile.topology .
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY topology/package.json topology/package-lock.json* ./topology/
+RUN cd topology && npm ci --omit=dev
+
+COPY topology/src ./topology/src
+# 迁移脚本也打进镜像（compose 的 migrate 一次性服务复用本镜像）
+COPY topology/scripts ./topology/scripts
+
+# Zabbix 凭据复用 P0 的 source.json：compose 把 ./server/data/source.json
+# 只读挂到 /app/config/source.json，TOPO_DB=mysql 时本地不再有 sqlite 文件
+ENV TOPO_PORT=8790 \
+    TOPO_DB=mysql \
+    ZBX_SOURCE_CFG=/app/config/source.json
+
+EXPOSE 8790
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:8790/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "topology/src/server.js"]

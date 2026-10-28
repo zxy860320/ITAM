@@ -118,9 +118,9 @@ export async function refreshRouteSnapshots(db, zbx, { nodeIds = null, batchSize
     const conds = [], args = [];
     if (strs.length) { conds.push(`zbx_hostid IN (${strs.map(() => '?').join(',')})`); args.push(...strs); }
     if (ints.length) { conds.push(`node_id IN (${ints.map(() => '?').join(',')})`); args.push(...ints); }
-    nodes = db.prepare(`SELECT node_id, zbx_hostid, display_name FROM topology_node WHERE status<>'stale' AND (${conds.join(' OR ')})`).all(...args);
+    nodes = await db.prepare(`SELECT node_id, zbx_hostid, display_name FROM topology_node WHERE status<>'stale' AND (${conds.join(' OR ')})`).all(...args);
   } else {
-    nodes = db.prepare(`SELECT node_id, zbx_hostid, display_name FROM topology_node
+    nodes = await db.prepare(`SELECT node_id, zbx_hostid, display_name FROM topology_node
       WHERE status<>'stale' AND (display_name LIKE '%核心%' OR display_name LIKE '%CORE%' OR display_name LIKE '%汇聚%'
         OR display_name LIKE '%AGG%' OR display_name LIKE '%FW%' OR display_name LIKE '%防火墙%'
         OR display_name LIKE '%互联网%' OR display_name LIKE '%接入区%')`).all();
@@ -187,14 +187,14 @@ export async function refreshRouteSnapshots(db, zbx, { nodeIds = null, batchSize
       if (!s.route && !s.addr) { s.status = 'error'; s.error = s.error || 'no data'; stat.error++; }
       else if (!s.route || !s.addr) { s.status = 'partial'; stat.error++; }
       else stat.ok++;
-      db.prepare('INSERT INTO topo_meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v')
+      await db.prepare('INSERT INTO topo_meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v')
         .run(`rt.${n.node_id}`, JSON.stringify(s));
     }
     const ids = created.map(c => c.itemid);
     if (ids.length) { try { await zbx.deleteItems(ids); } catch (e) { log(`${runId}: cleanup warn ${e.message}`); } }
     log(`${runId}: 批次 ${i / batchSize + 1} 完成 ok=${stat.ok} err=${stat.error}`);
   }
-  db.prepare('INSERT INTO topo_meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v')
+  await db.prepare('INSERT INTO topo_meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v')
     .run('rt.last_refresh', JSON.stringify({ at: now(), ...stat }));
   return stat;
 }
@@ -210,35 +210,36 @@ export async function cleanupRouteItems(zbx) {
 }
 
 /** 快照状态一览（前端显示新鲜度） */
-export function snapshotStatus(db) {
-  const rows = db.prepare(`SELECT k, v FROM topo_meta WHERE k LIKE 'rt.%' AND k<>'rt.last_refresh'`).all();
-  const data = rows.map(r => {
+export async function snapshotStatus(db) {
+  const rows = await db.prepare(`SELECT k, v FROM topo_meta WHERE k LIKE 'rt.%' AND k<>'rt.last_refresh'`).all();
+  const data = [];
+  for (const r of rows) {
     const nodeId = Number(r.k.slice(3));
-    const n = db.prepare('SELECT node_id, display_name, mgmt_ip FROM topology_node WHERE node_id=?').get(nodeId);
+    const n = await db.prepare('SELECT node_id, display_name, mgmt_ip FROM topology_node WHERE node_id=?').get(nodeId);
     let s = null; try { s = JSON.parse(r.v); } catch { /* */ }
-    return {
+    data.push({
       node_id: nodeId, name: n?.display_name || null, mgmt_ip: n?.mgmt_ip || null,
       ts: s?.ts || null, status: s?.status || 'bad_json',
       routes: s?.route ? parseRouteWalk(s.route).length : 0,
       addrs: s?.addr ? parseAddrWalk(s.addr).length : 0,
       error: s?.error || null,
-    };
-  });
-  const lr = db.prepare("SELECT v FROM topo_meta WHERE k='rt.last_refresh'").get();
+    });
+  }
+  const lr = await db.prepare("SELECT v FROM topo_meta WHERE k='rt.last_refresh'").get();
   return { data: data.sort((a, b) => (b.ts || 0) - (a.ts || 0)), last_refresh: lr ? JSON.parse(lr.v) : null };
 }
 
 // ---------- 追踪算法 ----------
 const MAX_HOPS = 10;
 
-function loadSnapshots(db) {
-  const rows = db.prepare(`SELECT k, v FROM topo_meta WHERE k LIKE 'rt.%' AND k<>'rt.last_refresh'`).all();
+async function loadSnapshots(db) {
+  const rows = await db.prepare(`SELECT k, v FROM topo_meta WHERE k LIKE 'rt.%' AND k<>'rt.last_refresh'`).all();
   const snaps = [];
   for (const r of rows) {
     const nodeId = Number(r.k.slice(3));
     let s = null; try { s = JSON.parse(r.v); } catch { /* */ }
     if (!s || !s.route || !s.addr) continue;
-    const node = db.prepare('SELECT node_id, zbx_hostid, display_name, mgmt_ip FROM topology_node WHERE node_id=?').get(nodeId);
+    const node = await db.prepare('SELECT node_id, zbx_hostid, display_name, mgmt_ip FROM topology_node WHERE node_id=?').get(nodeId);
     if (!node) continue;
     snaps.push({ node, routes: parseRouteWalk(s.route), addrs: parseAddrWalk(s.addr), ts: s.ts || 0 });
   }
@@ -251,10 +252,10 @@ function loadSnapshots(db) {
  * 每跳：最长前缀匹配查路由 → 下一跳IP用全局 ipAddr 快照反查纳管设备；
  * 出/入接口经 if_index→topology_interface，物理链路只取 topology_link 已有证据（无证据 link=null）。
  */
-export function tracePath(db, src, dst) {
+export async function tracePath(db, src, dst) {
   const srcU = ip2u(src), dstU = ip2u(dst);
   if (srcU === null || dstU === null) return { error: 'src/dst 须为合法 IPv4 地址' };
-  const snaps = loadSnapshots(db);
+  const snaps = await loadSnapshots(db);
   if (!snaps.length) return { error: '暂无路由快照，请先 POST /api/topology/pathtrace/refresh' };
 
   // 下一跳IP → 拥有该地址的快照设备
@@ -264,9 +265,9 @@ export function tracePath(db, src, dst) {
   const ifaceByIndex = db.prepare('SELECT interface_id, if_name, if_index FROM topology_interface WHERE node_id=? AND if_index=? AND stale=0 LIMIT 1');
   const ifaceName = db.prepare('SELECT if_name FROM topology_interface WHERE interface_id=?');
 
-  const findLink = (fromNodeId, outIfaceId, toNodeId) => {
+  const findLink = async (fromNodeId, outIfaceId, toNodeId) => {
     if (!outIfaceId || !toNodeId || fromNodeId === toNodeId) return null;
-    const rows = db.prepare(`SELECT l.link_id, l.status, l.a_iface, l.b_iface FROM topology_link l
+    const rows = await db.prepare(`SELECT l.link_id, l.status, l.a_iface, l.b_iface FROM topology_link l
       WHERE l.status NOT IN ('rejected','stale')
         AND ((l.a_node=? AND l.b_node=? AND l.a_iface=?) OR (l.b_node=? AND l.a_node=? AND l.b_iface=?))
       LIMIT 1`).get(fromNodeId, toNodeId, outIfaceId, fromNodeId, toNodeId, outIfaceId);
@@ -274,9 +275,9 @@ export function tracePath(db, src, dst) {
   };
 
   // 出接口的 LLDP 物理对端候选（对端必须是 active 纳管节点；排除来路接口与已访问设备；confirmed/manual 优先）
-  const findPhysNext = (fromNodeId, outIfaceId, excludeIfaceId, visitedSet) => {
+  const findPhysNext = async (fromNodeId, outIfaceId, excludeIfaceId, visitedSet) => {
     if (!outIfaceId) return [];
-    const rows = db.prepare(`SELECT l.link_id, l.status,
+    const rows = await db.prepare(`SELECT l.link_id, l.status,
         CASE WHEN l.a_node=? THEN l.b_node ELSE l.a_node END AS peer,
         CASE WHEN l.a_iface=? THEN l.b_iface ELSE l.a_iface END AS peer_iface
       FROM topology_link l
@@ -289,7 +290,7 @@ export function tracePath(db, src, dst) {
     const out = [];
     for (const r of rows) {
       if (visitedSet.has(r.peer)) continue;
-      const pn = db.prepare("SELECT node_id, display_name, mgmt_ip FROM topology_node WHERE node_id=? AND status='active'").get(r.peer);
+      const pn = await db.prepare("SELECT node_id, display_name, mgmt_ip FROM topology_node WHERE node_id=? AND status='active'").get(r.peer);
       if (!pn) continue;
       const snap = snaps.find(s => s.node.node_id === r.peer) || null;
       out.push({ link_id: r.link_id, status: r.status, peer_iface: r.peer_iface, node: snap, node_id: pn.node_id, display_name: pn.display_name, mgmt_ip: pn.mgmt_ip });
@@ -332,14 +333,14 @@ export function tracePath(db, src, dst) {
       const route = lpm(cur, dst);
       // 目的直连在本机 → 末跳（交付跳）
       const directToDst = cur.addrs.find(a => a.mask && isIp(a.mask) && covers(a.ip, a.mask, dst));
-      const entryIface = hop === 0 && ent.via ? ifaceByIndex.get(cur.node.node_id, ent.via.if_index) : null;
+      const entryIface = hop === 0 && ent.via ? await ifaceByIndex.get(cur.node.node_id, ent.via.if_index) : null;
       const hopRec = {
         node_id: cur.node.node_id, name: cur.node.display_name, mgmt_ip: cur.node.mgmt_ip,
         in_iface: hop === 0 ? (entryIface?.if_name || (ent.via ? `if${ent.via.if_index}` : null)) : inName,
         iface_id_in: hop === 0 ? (entryIface?.interface_id ?? null) : inId,
       };
       if (directToDst) {
-        const ai = ifaceByIndex.get(cur.node.node_id, directToDst.if_index);
+        const ai = await ifaceByIndex.get(cur.node.node_id, directToDst.if_index);
         hopRec.out_iface = ai?.if_name || `if${directToDst.if_index}`;
         hopRec.out_iface_id = ai?.interface_id ?? null;
         hopRec.action = 'direct';   // 目的直连本机
@@ -351,14 +352,14 @@ export function tracePath(db, src, dst) {
         // 直连路由但本机地址表没有该网段接口（如 from 表/黑洞）——不猜下一跳
         hopRec.action = 'route-guess';
         hopRec.route = { dest: route.dest, mask: route.mask, next_hop: route.next_hop, if_index: route.if_index };
-        const ai = ifaceByIndex.get(cur.node.node_id, route.if_index);
+        const ai = await ifaceByIndex.get(cur.node.node_id, route.if_index);
         hopRec.out_iface = ai?.if_name || null;
         hopRec.out_iface_id = ai?.interface_id ?? null;
         hops.push(hopRec);
         note = `路由出接口 ${hopRec.out_iface || 'if' + route.if_index} 但下一跳未定，停止（不伪造）`;
         break;
       }
-      const ai = ifaceByIndex.get(cur.node.node_id, route.if_index);
+      const ai = await ifaceByIndex.get(cur.node.node_id, route.if_index);
       hopRec.out_iface = ai?.if_name || (route.if_index != null ? `if${route.if_index}` : null);
       hopRec.out_iface_id = ai?.interface_id ?? null;
       hopRec.route = { dest: route.dest, mask: route.mask, next_hop: route.next_hop, if_index: route.if_index };
@@ -367,20 +368,20 @@ export function tracePath(db, src, dst) {
       const nxt = ipToSnap.get(route.next_hop);
       if (nxt) {
         // 物理链路证据：本端出接口 → 下一跳设备
-        const link = findLink(cur.node.node_id, hopRec.out_iface_id, nxt.snap.node.node_id);
+        const link = await findLink(cur.node.node_id, hopRec.out_iface_id, nxt.snap.node.node_id);
         hopRec.link = link ? { link_id: link.link_id, status: link.status } : null;
         hopRec.evidence = link ? (link.status === 'confirmed' || link.status === 'manual' ? 'lldp-confirmed' : link.status) : 'route-only';
         hops.push(hopRec);
         // 下一跳的"入接口"= 链路对端接口（若有证据；a/b 端不定，取非出接口的一端）
         cur = nxt.snap;
         inId = link ? (link.a_iface === hopRec.out_iface_id ? link.b_iface : link.a_iface) : null;
-        inName = inId ? ifaceName.get(inId)?.if_name || null : null;
+        inName = inId ? (await ifaceName.get(inId))?.if_name || null : null;
         continue;
       }
       // 下一跳 IP 不在任何快照地址表（常见：SNMP 只采到管理口 IP，三层互连 IP 采不到）
       // → 按用户核定方法：看本跳路由出接口的 LLDP 物理对端是哪台纳管设备，跳过去继续查其路由表。
       hopRec.next_hop_unresolved = route.next_hop; // IP 归属未知，如实标注
-      const cands = findPhysNext(cur.node.node_id, hopRec.out_iface_id, inId, visited);
+      const cands = await findPhysNext(cur.node.node_id, hopRec.out_iface_id, inId, visited);
       if (!cands.length) {
         hopRec.evidence = 'route-only';
         hopRec.next_hop_unmanaged = route.next_hop; // 且出接口无任何 LLDP 对端证据：设备边界，停止
@@ -396,7 +397,7 @@ export function tracePath(db, src, dst) {
       if (cands.length > 1) hopRec.peer_candidates = cands.map(c => ({ node_id: c.node_id, name: c.display_name, link_id: c.link_id }));
       hops.push(hopRec);
       inId = chosen.peer_iface;
-      inName = ifaceName.get(inId)?.if_name || null;
+      inName = (await ifaceName.get(inId))?.if_name || null;
       if (!chosen.node) {
         hops.push({ node_id: chosen.node_id, name: chosen.display_name, mgmt_ip: chosen.mgmt_ip, in_iface: inName, iface_id_in: inId,
           action: 'no-snapshot', evidence: hopRec.evidence, link: { link_id: chosen.link_id, status: chosen.status } });

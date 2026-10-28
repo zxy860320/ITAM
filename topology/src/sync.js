@@ -66,10 +66,10 @@ export async function syncTopology(db, zbx, cfg, log = () => {}) {
     if (!groups.length) flags.groups_empty = true;
     const degraded = Object.keys(flags).length > 0;
     if (degraded) stat.nodes_degraded++;
-    upNode.run(h.hostid, 'switch', vendor, h.name || h.host, mgmtIp,
+    await upNode.run(h.hostid, 'switch', vendor, h.name || h.host, mgmtIp,
       degraded ? 'degraded' : 'active', JSON.stringify(flags), now, now);
     stat.nodes++;
-    const { node_id: nodeId } = getNodeId.get(h.hostid);
+    const { node_id: nodeId } = await getNodeId.get(h.hostid);
 
     // 按 ifIndex 聚合本主机接口项
     const byIdx = {};
@@ -112,15 +112,15 @@ export async function syncTopology(db, zbx, cfg, log = () => {}) {
       const oper = operIt?.lastvalue != null && operIt.lastvalue !== '' ? +operIt.lastvalue : null;
       const itype = classify(label, descr, rec.items.type?.lastvalue);
       // ifIndex 漂移检测：同 fingerprint 旧记录 if_index 变了 → 记漂移（interface_id 保持不变）
-      const old = findIfaceByIndex.get(nodeId, idx);
+      const old = await findIfaceByIndex.get(nodeId, idx);
       if (old && old.if_name && old.if_name !== label) { stat.ifindex_drift++; log(`ifIndex 漂移 node=${h.host} idx=${idx}: ${old.if_name} → ${label}`); }
-      upIface.run(nodeId, fp, idx, label, descr, '', itype, speed, oper, now, now);
-      const { interface_id: ifaceId } = db.prepare('SELECT interface_id FROM topology_interface WHERE node_id=? AND fingerprint=?').get(nodeId, fp);
+      await upIface.run(nodeId, fp, idx, label, descr, '', itype, speed, oper, now, now);
+      const { interface_id: ifaceId } = await db.prepare('SELECT interface_id FROM topology_interface WHERE node_id=? AND fingerprint=?').get(nodeId, fp);
       stat.interfaces++;
-      const mapOne = (metric, it) => { if (it) { upMap.run(ifaceId, metric, String(it.itemid), it.key_); stat.mappings++; } };
-      mapOne('if_in', rec.items.in); mapOne('if_out', rec.items.out);
-      mapOne('if_speed', rec.items.speed); mapOne('if_oper', rec.items.status);
-      if (rec.items.errors?.length) { upMap.run(ifaceId, 'if_errors', String(rec.items.errors[0].itemid), rec.items.errors[0].key_); stat.mappings++; }
+      const mapOne = async (metric, it) => { if (it) { await upMap.run(ifaceId, metric, String(it.itemid), it.key_); stat.mappings++; } };
+      await mapOne('if_in', rec.items.in); await mapOne('if_out', rec.items.out);
+      await mapOne('if_speed', rec.items.speed); await mapOne('if_oper', rec.items.status);
+      if (rec.items.errors?.length) { await upMap.run(ifaceId, 'if_errors', String(rec.items.errors[0].itemid), rec.items.errors[0].key_); stat.mappings++; }
     }
     // 接口消失检测：本轮未见的置 missing_rounds（软删，保历史链路）
     const seenFps = Object.keys(byIdx).map(idxStr => {
@@ -128,11 +128,11 @@ export async function syncTopology(db, zbx, cfg, log = () => {}) {
       return sha1(`${nodeId}|${rec.label || `if${idxStr}`}|${rec.descr || ''}`);
     });
     if (seenFps.length) {
-      const all = db.prepare('SELECT fingerprint FROM topology_interface WHERE node_id=? AND stale=0').all(nodeId).map(r => r.fingerprint);
+      const all = (await db.prepare('SELECT fingerprint FROM topology_interface WHERE node_id=? AND stale=0').all(nodeId)).map(r => r.fingerprint);
       const gone = all.filter(fp => !seenFps.includes(fp));
       if (gone.length) {
         const stmt = db.prepare('UPDATE topology_interface SET missing_rounds=missing_rounds+1, stale=CASE WHEN missing_rounds+1>=3 THEN 1 ELSE 0 END WHERE node_id=? AND fingerprint=?');
-        for (const fp of gone) stmt.run(nodeId, fp);
+        for (const fp of gone) await stmt.run(nodeId, fp);
       }
     }
   }
