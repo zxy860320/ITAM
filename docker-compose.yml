@@ -10,10 +10,10 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQ...OT}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
       MYSQL_USER: ${MYSQL_USER:-topology}
-      MYSQL_PASSWORD: ${MYSQ...WORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -55,7 +55,7 @@ services:
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
       MYSQL_USER: ${MYSQL_USER:-topology}
-      MYSQL_PASSWORD: ${MYSQ...WORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
       ZBX_SOURCE_CFG: /app/config/source.json
     volumes:
@@ -91,7 +91,7 @@ services:
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
       MYSQL_USER: ${MYSQL_USER:-topology}
-      MYSQL_PASSWORD: ${MYSQ...WORD}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
     volumes:
       - ./topology/data/topology.db:/data/topology.db:ro
