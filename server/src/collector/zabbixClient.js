@@ -28,6 +28,13 @@ const GROUP_HINTS = [
   [/Linux|Windows|Zabbix|server|主机/i, 'server'],
 ];
 
+// —— 无线控制器识别（仍归 network 域，但打上 wlan 标记走无线专属形态）——
+// 模板特征：华为 "Huawei wireless Access Controller (AC)"；命名特征：wuxiankongzhiqui / wlan-ac 等
+const WLAN_TPL_RE = /wireless access controller/i;
+const WLAN_NAME_RE = /wuxian|无线|wlan[-_]?ac|ac[-_]wlan/i;
+// AC 级汇总项（列表列直接展示）：ac-users-total / ac-users-2.4 / ac-users-5；AP 状态名计数（ap-state-name-*）
+const WLAN_ITEM_KEYS = ['ac-users', 'ap-state-name'];
+
 // —— 真实指标 item key（跨模板族候选，取最新值）——
 // filter 是精确匹配，故用 search 通配 + 代码端精确/前缀过滤兜底
 const CPU_KEYS = ['system.cpu.util', 'hwCPUUsage', 'hrProcessorLoad', 'hwEntityCPUUtilization'];
@@ -116,12 +123,12 @@ export class ZabbixCollector {
             search: { key_: [...CPU_KEYS, ...MEM_KEYS, 'vfs.fs.size', 'vfs.fs.dependent.size', ...UPTIME_KEYS] },
             searchByAny: true,
           }),
-          // 设备摘要：型号/软件版本/位置/温度/ICMP 可达 —— 点开前列表就能展示
+          // 设备摘要：型号/软件版本/位置/温度/ICMP 可达 + 无线 AC 汇总（ac-users-*、ap-state-name-*）—— 点开前列表就能展示
           this.rpc('item.get', {
             output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock', 'units'],
             state: 0,
             status: 0,
-            search: { key_: INFO_KEYS },
+            search: { key_: [...INFO_KEYS, ...WLAN_ITEM_KEYS] },
             searchByAny: true,
           }).catch(() => []),
           this.rpc('item.get', { countOutput: true }).catch(() => null),
@@ -149,15 +156,23 @@ export class ZabbixCollector {
     }
   }
 
-  /** 三级分类：模板特征 → 主机命名 → 群组名（兜底 server） */
+  /** 三级分类：模板特征 → 主机命名 → 群组名（兜底 server）；附带无线控制器标记 */
   classify(h) {
     const tpl = (h.parentTemplates || []).map(t => `${t.host} ${t.name}`).join(' ; ');
-    for (const [re, domain, via] of TEMPLATE_RULES) if (re.test(tpl)) return { domain, via };
     const nm = `${h.host} ; ${h.name}`;
-    for (const [re, domain, via] of NAME_RULES) if (re.test(nm)) return { domain, via };
-    const gn = (h.groups || []).map(g => g.name).join(' ; ');
-    for (const [re, domain] of GROUP_HINTS) if (re.test(gn)) return { domain, via: '群组名' };
-    return { domain: 'server', via: '默认' };
+    let out = null;
+    for (const [re, domain, via] of TEMPLATE_RULES) if (re.test(tpl)) { out = { domain, via }; break; }
+    if (!out) {
+      for (const [re, domain, via] of NAME_RULES) if (re.test(nm)) { out = { domain, via }; break; }
+    }
+    if (!out) {
+      const gn = (h.groups || []).map(g => g.name).join(' ; ');
+      for (const [re, domain] of GROUP_HINTS) if (re.test(gn)) { out = { domain, via: '群组名' }; break; }
+    }
+    if (!out) out = { domain: 'server', via: '默认' };
+    // 无线控制器：仍归 network 域，wlan=true 供前端切换无线专属形态
+    if (out.domain === 'network' && (WLAN_TPL_RE.test(tpl) || WLAN_NAME_RE.test(nm))) out.wlan = true;
+    return out;
   }
 
   /** Zabbix 原始对象 → 平台内部模型（全群组主机分类在此生效） */
@@ -186,7 +201,7 @@ export class ZabbixCollector {
       else if (UPTIME_KEYS.some(x => k === x || k.startsWith(x + '['))) rec.uptime = v;
     }
 
-    // 1b) 设备摘要按主机聚合（ICMP 三件套 + 型号/版本/位置/温度）
+    // 1b) 设备摘要按主机聚合（ICMP 三件套 + 型号/版本/位置/温度 + 无线 AC 汇总）
     const infoBy = {};
     for (const it of rawInfo || []) {
       if (!Number(it.lastclock)) continue;
@@ -199,16 +214,28 @@ export class ZabbixCollector {
       else if (k === 'system.sw.os') rec.sw_os = v;
       else if (k === 'system.location') rec.location = v;
       else if (k.startsWith('sensor.temp.value')) rec.temp = +v;
+      // 无线 AC：AP 状态名计数（ap-state-name-[AP]）+ 接入用户数（ac-users-total/2.4/5）
+      // 华为备机侧状态文本有 "IdleIdle" 变体（双射频拼接），归并到 Idle
+      else if (k.startsWith('ap-state-name')) {
+        let st = String(v || '').trim() || '未知';
+        if (st === 'IdleIdle') st = 'Idle';
+        (rec.apStates = rec.apStates || {})[st] = (rec.apStates[st] || 0) + 1;
+      }
+      else if (k === 'ac-users-total') rec.wlanUsersTotal = +v;
+      else if (k === 'ac-users-2.4') rec.wlanUsers24 = +v;
+      else if (k === 'ac-users-5') rec.wlanUsers5 = +v;
     }
 
     // 2) 全群组主机 → 三级分类
     const hosts = [], services = [];
     const hostDomain = {};               // hostid → domain（事件关联用）
+    const hostWlan = {};                 // hostid → 是否无线控制器（事件噪声标注用）
     const grpAgg = {};                   // 群组 → 各域计数
     const viaAgg = {};                   // 判定依据 → 计数
     for (const h of rawHosts) {
-      const { domain, via } = this.classify(h);
+      const { domain, via, wlan } = this.classify(h);
       hostDomain[h.hostid] = domain;
+      if (wlan) hostWlan[h.hostid] = true;
       viaAgg[via] = (viaAgg[via] || 0) + 1;
       for (const g of (h.groups || [])) {
         const s = (grpAgg[g.name] = grpAgg[g.name] || { counts: {}, total: 0 });
@@ -237,6 +264,15 @@ export class ZabbixCollector {
         model: inf.model || '', swOs: inf.sw_os || '', location: inf.location || '', temp: inf.temp ?? null,
         description: h.description || '',
         cpuSpark: [], memSpark: [],
+        // 无线控制器扩展（wlan=true → 前端走无线形态）：AP 状态汇总 + 接入用户数
+        ...(wlan ? {
+          wlan: true,
+          apStates: inf.apStates || null,
+          apTotal: inf.apStates ? Object.values(inf.apStates).reduce((a, b) => a + b, 0) : null,
+          wlanUsers: inf.wlanUsersTotal ?? null,
+          wlanUsers24: inf.wlanUsers24 ?? null,
+          wlanUsers5: inf.wlanUsers5 ?? null,
+        } : {}),
       };
       if (domain === 'service') services.push(rec); else hosts.push(rec);
     }
@@ -249,7 +285,7 @@ export class ZabbixCollector {
     }
     const events = (rawProblems || []).map(p => {
       const hostid = trigHost[p.objectid] || (hostDomain[p.objectid] ? p.objectid : null);
-      return {
+      const ev = {
         eventid: p.eventid,
         clock: Number(p.clock) * 1000,
         severity: mapSev(p.severity),
@@ -261,12 +297,18 @@ export class ZabbixCollector {
         tags: (p.tags || []).map(t => (t.value ? `${t.tag}:${t.value}` : t.tag)),
         status: 'active',
       };
+      // 无线设备哨兵值噪声标注：华为 AP 温度传感器不可读时上报 255（并非真过温），
+      // 触发器照常报警。展示层如实标注 noise 并从"异常计数"剔除，不改 Zabbix 配置。
+      if (hostid && hostWlan[hostid] && /TEMP=255\b/.test(p.name)) ev.noise = '哨兵值：AP 温度传感器不可读（255），非真实过温';
+      return ev;
     });
     const entIndex = new Map([...hosts, ...services].map(x => [x.hostid, x]));
     const SEV_NUM = { info: 1, warning: 2, severe: 3, critical: 4 };
     for (const ev of events) {
       const ent = entIndex.get(ev.hostid);
-      if (ent) { ent.problems++; ent._sev = Math.max(ent._sev || 0, SEV_NUM[ev.severity] || 0); }
+      if (!ent) continue;
+      if (ev.noise) { ent.noiseProblems = (ent.noiseProblems || 0) + 1; continue; }
+      ent.problems++; ent._sev = Math.max(ent._sev || 0, SEV_NUM[ev.severity] || 0);
     }
     for (const ent of entIndex.values()) {
       if (ent.status === 'off' || (ent._sev || 0) >= 4) ent.availability = 'critical';
@@ -370,6 +412,57 @@ export class ZabbixCollector {
     const netIfs = [...ifcMap.values()].filter(x => x.name && !x.name.startsWith('if#'))
       .sort((a, b) => (b.status === 1) - (a.status === 1) || a.name.localeCompare(b.name));
 
+    // —— 无线 AP 实例表（华为 AC 模板 LLD）——
+    // key 形态：ap-<指标>-[<AP标识>]，同一 AP 所有指标共用同一方括号标识。
+    // ⚠ Zabbix search 对含字面 "]" 的值匹配失效（模板里有个 AP 名带中文+"]AP"），
+    //   所以这里不用 search，直接扫该主机全量 items 按正则归组（detail 本就拉全量）。
+    const APRE = /^ap-(MAC|NAME|group|model|id|state|state-name|clients|clients-2\.4GHz|clientes-5|cpu|memory|temp|eth-download|eth-upload|latitude|longitude|remote-neighbor-interface-id|remote-neighbor-system-name|2\.4GHz-channel-interference-rate|2\.4GHz-radio-noise|5GHz-channel-interference-rate|5GHz-radio-noise)-\[(.+)\]$/;
+    const apMap = new Map();
+    for (const it of items) {
+      const m = APRE.exec(it.key_);
+      if (!m) continue;
+      let ap = apMap.get(m[2]);
+      if (!ap) { ap = { id: m[2], name: '', mac: '', group: '', model: '', state: null, stateName: '', clients: null, clients24: null, clients5: null, cpu: null, mem: null, temp: null, ethIn: null, ethOut: null }; apMap.set(m[2], ap); }
+      const v = it.lastvalue;
+      switch (m[1]) {
+        case 'NAME': if (v) ap.name = v; break;
+        case 'MAC': if (v) ap.mac = v; break;
+        case 'group': if (v) ap.group = v; break;
+        case 'model': if (v) ap.model = v; break;
+        case 'state': ap.state = v; break;
+        case 'state-name': if (v) ap.stateName = v; break;
+        case 'clients': ap.clients = +v; break;
+        case 'clients-2.4GHz': if (Number(it.state) !== 1) ap.clients24 = +v; break;
+        case 'clientes-5': if (Number(it.state) !== 1) ap.clients5 = +v; break;
+        case 'cpu': ap.cpu = +v; break;
+        case 'memory': ap.mem = +v; break;
+        case 'temp': ap.temp = +v; break;
+        case 'eth-download': ap.ethIn = +v; break;
+        case 'eth-upload': ap.ethOut = +v; break;
+      }
+    }
+    const apList = [...apMap.values()]
+      .map(x => {
+        // 名称回退链：ap-name 常空 → 从实例标识提取（"办公间-面封AP 68.xx.xx" 或纯 MAC 形态）
+        const idName = x.id.replace(/-\d{1,3}(\.\d{1,3}){3}\.\d+(\.\d+)?$/, '').replace(/\s+[\w.-]*AP\s*$/i, '').trim();
+        x.label = x.name || idName || x.mac || x.id;
+        // 温度 255=传感器不可读哨兵值（华为 AP 常见），如实置 null
+        if (x.temp === 255) x.temp = null;
+        // 华为备机侧状态文本 "IdleIdle" 变体（双射频拼接），归并到 Idle
+        if (x.stateName === 'IdleIdle') x.stateName = 'Idle';
+        // 实例标识里常带 AP 管理 IP（尾段 x.x.x.x.NN.NN）
+        const ipm = x.id.match(/(\d{1,3}(?:\.\d{1,3}){3})\.\d+(?:\.\d+)?$/);
+        x.ip = ipm ? ipm[1] : '';
+        return x;
+      })
+      .sort((a, b) => (a.stateName === 'Normal' ? 0 : 1) - (b.stateName === 'Normal' ? 0 : 1) || a.label.localeCompare(b.label, 'en', { numeric: true }));
+
+    // —— AP 名称索引 → 供 series 的 ap/apmetric 参数定位具体 AP 的指标 ——
+    const apItemIdx = {};
+    if (apList.length) {
+      apList.forEach((ap, i) => { apItemIdx[`ap#${i}|${ap.id}`] = ap; });
+    }
+
     // —— 设备档案（字符串/标量类 item 摊平）——
     const txt = k => (byKey[k]?.[0]?.lastvalue || '').replace(/[\r\n]+/g, ' ').trim();
     const profile = {
@@ -404,6 +497,16 @@ export class ZabbixCollector {
     const data = {
       profile,
       netIfs,
+      apList,
+      wlanSummary: apList.length ? {
+        apTotal: apList.length,
+        apNormal: apList.filter(x => x.stateName === 'Normal').length,
+        apFault: apList.filter(x => x.stateName && x.stateName !== 'Normal' && x.stateName !== 'Idle').length,
+        apIdle: apList.filter(x => x.stateName === 'Idle').length,
+        usersTotal: byKey['ac-users-total']?.[0]?.lastvalue || '',
+        users24: byKey['ac-users-2.4']?.[0]?.lastvalue || '',
+        users5: byKey['ac-users-5']?.[0]?.lastvalue || '',
+      } : null,
       itemCount: items.length,
       interfaces: (ifaces || []).map(i => ({
         ip: i.ip, dns: i.dns, port: i.port, type: +i.type, useip: +i.useip,
@@ -425,7 +528,7 @@ export class ZabbixCollector {
    * till = 窗口结束锚点（epoch 秒，0=现在），用于回看过去某个时间段。
    * 一次返回该设备全部可用指标（cpu/mem/temp/load/proc/fs/ping + 选定接口的流量）。
    */
-  async series(hostid, range = '6h', till = 0, iface = '', dev = '', mnt = '') {
+  async series(hostid, range = '6h', till = 0, iface = '', dev = '', mnt = '', ap = '') {
     if (this.mode !== 'zabbix') return null;
     const SPAN = { '6h': 6 * 3600, '24h': 24 * 3600, '7d': 7 * 86400, '30d': 30 * 86400 };
     const span = SPAN[range] || SPAN['6h'];
@@ -434,14 +537,14 @@ export class ZabbixCollector {
     const t1 = t2 - span;
 
     const cache = (this._seriesCache = this._seriesCache || new Map());
-    const ck = `${hostid}|${range}|${t2}|${iface}|${dev}|${mnt}`;
+    const ck = `${hostid}|${range}|${t2}|${iface}|${dev}|${mnt}|${ap}`;
     const hit = cache.get(ck);
     if (hit && Date.now() - hit.at < (span > 86400 ? 300e3 : 60e3)) return hit.data;
 
     const searchKeys = ['system.cpu.util', 'hwCPUUsage', 'hrProcessorLoad', 'hwEntityCPUUtilization',
       'vm.memory.util', 'hrMemoryLoad', 'vm.memory.size', 'icmppingsec', 'sensor.temp.value',
       'system.cpu.load', 'proc.num', 'vfs.fs', 'net.if.in', 'net.if.out',
-      'vfs.dev.read.rate', 'vfs.dev.write.rate'];
+      'vfs.dev.read.rate', 'vfs.dev.write.rate', 'ac-users'];
     const num = k => k.split('[')[0];
     const items = await this.rpc('item.get', {
       output: ['itemid', 'key_', 'name', 'lastclock', 'lastvalue', 'value_type', 'history', 'trends', 'units'],
@@ -543,9 +646,35 @@ export class ZabbixCollector {
         || pick(['vfs.fs.size', 'vfs.fs.dependent.size'], i => i.key_.includes('pused') && i.units === '%'),
       ping: pick(['icmppingsec']),
     };
+
+    // —— 无线指标（华为 AC）——
+    //  AC 级：ac-users-total/2.4/5（search 已带）；AP 级：按 ap 参数（LLD 实例标识）取该 AP 的
+    //  clients/上下行流量/CPU/内存。AP key 方括号含点号等，用不带括号的指标前缀 search 再代码端精确匹配。
+    const apUsers = {
+      total: pick(['ac-users-total']), u24: pick(['ac-users-2.4']), u5: pick(['ac-users-5']),
+    };
+    let apItems = [];
+    if (ap) {
+      apItems = await this.rpc('item.get', {
+        output: ['itemid', 'key_', 'name', 'lastclock', 'lastvalue', 'value_type', 'history', 'trends', 'units'],
+        hostids: [hostid], state: 0, status: 0,
+        search: { key_: ['ap-clients-', 'ap-cpu-', 'ap-memory-', 'ap-temp-', 'ap-eth-'] }, searchByAny: true,
+      }).catch(() => []);
+    }
+    const apChosen = {};
+    if (ap) {
+      for (const it of apItems) {
+        const m = /^ap-(clients-2\.4GHz|clientes-5|clients|cpu|memory|temp|eth-download|eth-upload)-\[(.+)\]$/.exec(it.key_);
+        if (m && m[2] === ap && Number(it.lastclock)) {
+          const slot = { clients: 'clients', 'clients-2.4GHz': 'clients24', 'clientes-5': 'clients5', cpu: 'cpu', memory: 'mem', temp: 'temp', 'eth-download': 'ethIn', 'eth-upload': 'ethOut' }[m[1]];
+          if (slot && !apChosen[slot]) apChosen[slot] = it;
+        }
+      }
+    }
     const tIn = ifaceRec?.in || null, tOut = ifaceRec?.out || null;
     const dR = devRec?.read || null, dW = devRec?.write || null;
-    const all = [...Object.values(chosen), tIn, tOut, dR, dW].filter(Boolean);
+    const all = [...Object.values(chosen), tIn, tOut, dR, dW,
+      apUsers.total, apUsers.u24, apUsers.u5, ...Object.values(apChosen)].filter(Boolean);
 
     let grain = 'raw', mk = null;
     if (!all.length) {
@@ -591,6 +720,10 @@ export class ZabbixCollector {
       load: mk(chosen.load), proc: mk(chosen.proc), fs: mk(chosen.fs), ping: mk(chosen.ping),
       traffic: { iface: ifaceRec?.iface || '', label: ifaceRec?.label || '', in: mk(tIn), out: mk(tOut) },
       dio: { dev: devRec?.dev || '', read: mk(dR), write: mk(dW) },
+      // 无线：AC 接入用户数（总数/2.4G/5G）+ 选定 AP 的客户端与上下行流量等
+      wlanUsers: { total: mk(apUsers.total), u24: mk(apUsers.u24), u5: mk(apUsers.u5) },
+      ap: { id: ap, clients: mk(apChosen.clients), clients24: mk(apChosen.clients24), clients5: mk(apChosen.clients5),
+        ethIn: mk(apChosen.ethIn), ethOut: mk(apChosen.ethOut), cpu: mk(apChosen.cpu), mem: mk(apChosen.mem), temp: mk(apChosen.temp) },
     };
     const refIt = chosen.cpu || chosen.mem || chosen.temp || chosen.ping || tIn;
     const data = {

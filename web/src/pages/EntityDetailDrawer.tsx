@@ -39,21 +39,23 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
   const id = entity.hostid || entity.serviceid;
   const { data } = usePoll(() => api.entity(id), 60000, id);
   const { data: d, reload } = usePoll(() => api.entityDetail(id).then(r => r.detail), 120000, id);
-  const [tab, setTab] = React.useState<'ifs' | 'items'>('ifs');
+  const [tab, setTab] = React.useState<'ifs' | 'aps' | 'items'>('ifs');
   const [ifPage, setIfPage] = React.useState(1);
+  const [apPage, setApPage] = React.useState(1);
   const [itemPage, setItemPage] = React.useState(1);
 
   // —— 时间窗：6h/24h 走 history 原始；7d/30d 走 trend 小时聚合；tillStr 可回看过去某段 ——
   const [range, setRange] = React.useState<'6h' | '24h' | '7d' | '30d'>('6h');
   const [tillStr, setTillStr] = React.useState(''); // datetime-local，'' = 现在
   const tillEpoch = tillStr ? Math.floor(new Date(tillStr).getTime() / 1000) : 0;
-  const [metric, setMetric] = React.useState<'res' | 'temp' | 'load' | 'proc' | 'fs' | 'dio' | 'traffic' | 'ping'>('res');
+  const [metric, setMetric] = React.useState<'res' | 'temp' | 'load' | 'proc' | 'fs' | 'dio' | 'traffic' | 'ping' | 'wlanusers' | 'apclients' | 'aptraffic'>('res');
   const [iface, setIface] = React.useState(''); // 流量接口（'' = 后端自动选活跃口）
   const [dev, setDev] = React.useState('');     // 磁盘设备（'' = 后端自动选最活跃盘）
   const [mnt, setMnt] = React.useState('');     // 磁盘分区挂载点（'' = 后端自动选根分区）
+  const [ap, setAp] = React.useState('');       // 无线 AP 实例标识（LLD；'' = 首个非 Idle AP，后端按此拉 AP 级时序）
   const { data: sd } = usePoll(
-    () => api.entitySeries(id, { range, till: tillEpoch, iface, dev, mnt }).then(r => r.series),
-    120000, `${id}|${range}|${tillEpoch}|${iface}|${dev}|${mnt}`,
+    () => api.entitySeries(id, { range, till: tillEpoch, iface, dev, mnt, ap }).then(r => r.series),
+    120000, `${id}|${range}|${tillEpoch}|${iface}|${dev}|${mnt}|${ap}`,
   );
 
   React.useEffect(() => {
@@ -63,9 +65,23 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
 
   const prof = d?.profile || {};
   const netIfs = d?.netIfs || [];
+  const apList: any[] = d?.apList || [];
+  const wlan = !!entity.wlan || apList.length > 0;
+  const wl = d?.wlanSummary || null;
   const items = d?.items || [];
   const events = data?.events || [];
   const color = DOM_COLOR[entity.domain];
+
+  // 无线设备：AP 选择默认取首个非 Idle（备机侧 AP 全 Idle 时退首个），驱动 AP 级趋势
+  const tabTouched = React.useRef(false);
+  React.useEffect(() => {
+    if (apList.length && !ap) {
+      const pickAp = apList.find(x => x.stateName !== 'Idle') || apList[0];
+      setAp(pickAp?.id || '');
+    }
+    if (apList.length && !tabTouched.current) setTab('aps');
+  }, [apList.length]);
+  const curAp = apList.find(x => x.id === ap) || null;
 
   // —— 趋势数据（来自 series 接口，一次返回全部指标）——
   const S: any = sd?.series || {};
@@ -75,6 +91,11 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
   const has = (k: string) => (S[k]?.avg?.length || 0) > 0;
   const trafficOn = (S.traffic?.in?.avg?.length || 0) > 0 || (S.traffic?.out?.avg?.length || 0) > 0;
   const dioOn = (S.dio?.read?.avg?.length || 0) > 0 || (S.dio?.write?.avg?.length || 0) > 0;
+  // 无线指标可用性
+  const Sx: any = S;
+  const wlanUsersOn = (Sx.wlanUsers?.total?.avg?.length || 0) > 0;
+  const apClientsOn = (Sx.ap?.clients?.avg?.length || 0) > 0;
+  const apTrafficOn = (Sx.ap?.ethIn?.avg?.length || 0) > 0 || (Sx.ap?.ethOut?.avg?.length || 0) > 0;
   const devs: { dev: string }[] = sd?.devs || [];
   const mnts: { mnt: string; label: string; cur: number }[] = sd?.mnts || [];
   const fsLabel = mnt ? (mnts.find(x => x.mnt === mnt)?.label || `磁盘使用 [${mnt}]`) : (sd?.meta?.fs?.label || '磁盘使用');
@@ -124,7 +145,11 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
   }, [xfmt]);
 
   const METRICS: { key: typeof metric; label: string; show: boolean; pairs: { name: string; s: any; color: string }[]; opt: Parameters<typeof lineOpt>[1]; empty: string }[] = [
-    { key: 'res', label: 'CPU / 内存', show: true, pairs: [{ name: 'CPU', s: S.cpu || {}, color }, { name: '内存', s: S.mem || {}, color: '#F59E0B' }], opt: { yMax: 100, yName: '%' }, empty: '该设备无 CPU/内存监控项' },
+    { key: 'res', label: 'CPU / 内存', show: !wlan, pairs: [{ name: 'CPU', s: S.cpu || {}, color }, { name: '内存', s: S.mem || {}, color: '#F59E0B' }], opt: { yMax: 100, yName: '%' }, empty: '该设备无 CPU/内存监控项' },
+    // —— 无线专属趋势 ——
+    { key: 'wlanusers', label: '接入用户数', show: wlan, pairs: [{ name: '总用户', s: Sx.wlanUsers?.total || {}, color: '#22D3EE' }, { name: '2.4G', s: Sx.wlanUsers?.u24 || {}, color: '#A78BFA' }, { name: '5G', s: Sx.wlanUsers?.u5 || {}, color: '#34D399' }], opt: {}, empty: '无 ac-users 监控项' },
+    { key: 'apclients', label: curAp ? `AP终端数(${curAp.label})` : 'AP终端数', show: wlan && apClientsOn, pairs: [{ name: '终端总数', s: Sx.ap?.clients || {}, color: '#22D3EE' }, { name: '2.4G', s: Sx.ap?.clients24 || {}, color: '#A78BFA' }, { name: '5G', s: Sx.ap?.clients5 || {}, color: '#34D399' }], opt: {}, empty: '该 AP 无终端数监控项' },
+    { key: 'aptraffic', label: curAp ? `AP上下行(${curAp.label})` : 'AP上下行', show: wlan && apTrafficOn, pairs: [{ name: '上行', s: Sx.ap?.ethIn || {}, color }, { name: '下行', s: Sx.ap?.ethOut || {}, color: '#F59E0B' }], opt: { scaleAuto: true }, empty: '该 AP 无有线口流量监控项' },
     { key: 'temp', label: '温度', show: has('temp'), pairs: [{ name: '温度', s: S.temp || {}, color: '#F97316' }], opt: { yName: '°C' }, empty: '无温度传感器' },
     { key: 'load', label: '负载', show: has('load'), pairs: [{ name: 'Load (5m)', s: S.load || {}, color: '#A78BFA' }], opt: {}, empty: '无负载监控项' },
     { key: 'proc', label: '进程数', show: has('proc'), pairs: [{ name: '进程数', s: S.proc || {}, color: '#38BDF8' }], opt: {}, empty: '无进程数监控项' },
@@ -137,6 +162,7 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
   const cur = shown.find(m => m.key === metric) || shown[0];
 
   const ifRows = netIfs.slice((ifPage - 1) * 10, ifPage * 10);
+  const apPageRows = apList.slice((apPage - 1) * 10, apPage * 10);
   const itemRows = items.slice((itemPage - 1) * 12, itemPage * 12);
 
   return (
@@ -157,20 +183,38 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
           <button className="btn" style={{ marginLeft: 6 }} onClick={onClose}>关闭</button>
         </div>
 
-        {/* 核心指标 */}
+        {/* 核心指标：无线 AC 走 AP/用户维度，普通设备走 CPU/内存/磁盘维度 */}
         <div className="grid-3" style={{ gap: 10, marginBottom: 14 }}>
-          <Metric label="CPU" value={entity.cpu == null ? '—' : `${entity.cpu}%`} />
-          <Metric label="内存" value={entity.mem == null ? '—' : `${entity.mem}%`} />
-          <Metric label="磁盘使用" value={entity.disk == null ? '—' : `${entity.disk}%`} />
+          {wlan && (wl || apList.length || entity.apTotal != null || entity.wlanUsers != null) ? (<>
+            <Metric label="AP 总数" value={wl ? `${wl.apTotal}` : (entity.apTotal ?? '—')} />
+            <Metric label="AP 正常" value={wl ? `${wl.apNormal}` : '—'} color="var(--sev-healthy)" />
+            <Metric label="AP 异常" value={wl ? `${wl.apFault}` : '—'} color={wl && wl.apFault ? 'var(--sev-critical)' : undefined} />
+            <Metric label="接入用户总数" value={wl?.usersTotal || entity.wlanUsers || '—'} />
+            <Metric label="2.4G / 5G 用户" value={wl ? `${wl.users24 || '—'} / ${wl.users5 || '—'}` : `${entity.wlanUsers24 ?? '—'} / ${entity.wlanUsers5 ?? '—'}`} />
+            <Metric label="AP 待机(Idle)" value={wl ? `${wl.apIdle}` : '—'} small color={wl && wl.apIdle === wl.apTotal ? 'var(--text-3)' : wl && wl.apIdle ? 'var(--sev-warning)' : undefined}
+            />
+          </>) : (<>
+            <Metric label="CPU" value={entity.cpu == null ? '—' : `${entity.cpu}%`} />
+            <Metric label="内存" value={entity.mem == null ? '—' : `${entity.mem}%`} />
+            <Metric label="磁盘使用" value={entity.disk == null ? '—' : `${entity.disk}%`} />
+          </>)}
           <Metric label="ICMP 可达" value={entity.ping == null ? '—' : entity.ping ? '在线' : '不可达'} small
             color={entity.ping == null ? undefined : entity.ping ? 'var(--sev-healthy)' : 'var(--sev-critical)'} />
           <Metric label="ICMP 时延" value={entity.pingMs == null ? '—' : `${entity.pingMs} ms`} small />
           <Metric label="丢包率" value={entity.pingLoss == null ? '—' : `${entity.pingLoss}%`} small
             color={entity.pingLoss ? 'var(--sev-warning)' : undefined} />
-          <Metric label="设备温度" value={entity.temp == null ? '—' : `${entity.temp} °C`} small />
+          {!wlan && <Metric label="设备温度" value={entity.temp == null ? '—' : `${entity.temp} °C`} small />}
           <Metric label="在线时长" value={entity.uptimeDays != null ? `${entity.uptimeDays} 天` : entity.status === 'off' ? '离线' : '—'} small />
           <Metric label="监控项" value={d ? `${d.itemCount} 个` : '…'} small />
         </div>
+        {wlan && (
+          <div style={{ fontSize: 11, color: 'var(--text-3)', margin: '-6px 0 12px' }}>
+            {wl || apList.length || entity.wlanUsers != null ? (<>
+              无线控制器（AC）视图：核心指标为 AP 与接入用户维度。AP 状态来自 Zabbix LLD 的 ap-state-name 项；
+              Idle 表示该 AP 由主机侧接管/待机（主备场景下属正常）。温度 255° 为传感器不可读哨兵值，已按异常剔除并标注。
+            </>) : '该控制器在 Zabbix 中未发现 AP/接入用户类无线监控项（SNMP 停采或未配置无线模板），无线指标暂无数据。'}
+          </div>
+        )}
 
         {/* 设备档案 */}
         <div className="card" style={{ marginBottom: 12 }}>
@@ -270,19 +314,63 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
                 </select>
               </label>
             )}
+            {(cur?.key === 'apclients' || cur?.key === 'aptraffic') && apList.length > 0 && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+                AP
+                <select value={ap} onChange={e => setAp(e.target.value)}
+                  className="mono" style={{ background: 'var(--bg-inset)', border: '1px solid var(--hairline)', color: 'var(--text-1)', borderRadius: 'var(--radius-sm)', padding: '3px 6px', fontSize: 10, colorScheme: 'dark', maxWidth: 300 }}>
+                  {apList.map(x => <option key={x.id} value={x.id}>{x.label}{x.stateName && x.stateName !== 'Normal' ? ` [${x.stateName}]` : ''}</option>)}
+                </select>
+              </label>
+            )}
           </div>
           {cur && (cur.pairs.some(p => (p.s.avg?.length || 0) > 0)
             ? <Chart option={lineOpt(cur.pairs, cur.opt)} height={220} />
             : <div style={{ color: 'var(--text-3)', fontSize: 12 }}>该时间窗内无数据（可能超出 Zabbix 历史保留期，或{cur.empty}）</div>)}
         </div>
 
-        {/* 接口 / 监控项 切换表 */}
+        {/* 接口 / AP / 监控项 切换表 */}
         <div className="card" style={{ marginBottom: 12 }}>
           <div className="card-title">
-            <span className={`tab-btn ${tab === 'ifs' ? 'on' : ''}`} onClick={() => { setTab('ifs'); setIfPage(1); }}>网络接口（{netIfs.length}）</span>
-            <span className={`tab-btn ${tab === 'items' ? 'on' : ''}`} onClick={() => { setTab('items'); setItemPage(1); }}>全部监控项（{items.length}）</span>
+            {wlan && <span className={`tab-btn ${tab === 'aps' ? 'on' : ''}`} onClick={() => { setTab('aps'); setApPage(1); tabTouched.current = true; }}>无线 AP（{apList.length}）</span>}
+            <span className={`tab-btn ${tab === 'ifs' ? 'on' : ''}`} onClick={() => { setTab('ifs'); setIfPage(1); tabTouched.current = true; }}>网络接口（{netIfs.length}）</span>
+            <span className={`tab-btn ${tab === 'items' ? 'on' : ''}`} onClick={() => { setTab('items'); setItemPage(1); tabTouched.current = true; }}>全部监控项（{items.length}）</span>
           </div>
-          {tab === 'ifs' ? (
+          {tab === 'aps' ? (
+            apList.length ? (
+              <table className="data fixed nowrap">
+                <colgroup>
+                  <col style={{ width: '20%' }} /><col style={{ width: '12%' }} /><col style={{ width: '9%' }} /><col style={{ width: '10%' }} />
+                  <col style={{ width: '8%' }} /><col style={{ width: '8%' }} /><col style={{ width: '7%' }} /><col style={{ width: '10%' }} /><col style={{ width: '10%' }} /><col style={{ width: '6%' }} />
+                </colgroup>
+                <thead><tr><th>AP 名称</th><th>状态</th><th className="num">终端</th><th className="num">终端2.4G/5G</th><th className="num">CPU</th><th className="num">内存</th><th className="num">温度</th><th className="num">上行</th><th className="num">下行</th><th className="num">告警</th></tr></thead>
+                <tbody>
+                  {apPageRows.map((x: any, i: number) => (
+                    <tr key={i} style={{ cursor: 'pointer' }} onClick={() => { setAp(x.id); setMetric('apclients'); }}>
+                      <td title={`${x.label}\nMAC: ${x.mac || '—'}\n组: ${x.group || '—'}\n型号: ${x.model || '—'}${x.ip ? `\nIP: ${x.ip}` : ''}`}
+                        style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{x.label}</td>
+                      <td><span style={{
+                        color: x.stateName === 'Normal' ? 'var(--sev-healthy)'
+                          : x.stateName === 'Fault' ? 'var(--sev-critical)'
+                            : x.stateName === 'Idle' ? 'var(--text-3)' : 'var(--sev-warning)',
+                      }}>{x.stateName || (x.state != null ? `状态${x.state}` : '—')}</span></td>
+                      <td className="mono num" style={{ fontSize: 11 }}>{x.clients ?? '—'}</td>
+                      <td className="mono num" style={{ fontSize: 11, color: 'var(--text-3)' }}>{(x.clients24 != null || x.clients5 != null) ? `${x.clients24 ?? '—'}/${x.clients5 ?? '—'}` : '—'}</td>
+                      <td className="mono num" style={{ fontSize: 11 }}>{x.cpu ?? '—'}</td>
+                      <td className="mono num" style={{ fontSize: 11 }}>{x.mem ?? '—'}</td>
+                      <td className="mono num" style={{ fontSize: 11, color: x.temp == null ? 'var(--text-3)' : x.temp >= 50 ? 'var(--sev-warning)' : undefined }}
+                        title={x.temp == null ? '温度传感器不可读（哨兵值 255）' : undefined}>{x.temp == null ? '—*' : `${x.temp}°`}</td>
+                      <td className="mono num" style={{ fontSize: 11 }}>{fmtBps(x.ethIn)}</td>
+                      <td className="mono num" style={{ fontSize: 11 }}>{fmtBps(x.ethOut)}</td>
+                      <td className="mono num" style={{ fontSize: 11, color: x.stateName && x.stateName !== 'Normal' && x.stateName !== 'Idle' ? 'var(--sev-critical)' : 'var(--text-3)' }}>
+                        {x.stateName && x.stateName !== 'Normal' && x.stateName !== 'Idle' ? '●' : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <div style={{ color: 'var(--text-3)', fontSize: 12 }}>该 AC 未发现 AP（LLD 未发现或未启用）</div>
+          ) : tab === 'ifs' ? (
             netIfs.length ? (
               <table className="data fixed nowrap">
                 <colgroup>
@@ -321,19 +409,22 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
               </tbody>
             </table>
           )}
-          {tab === 'ifs'
-            ? <Pager page={ifPage} size={10} total={netIfs.length} onPage={setIfPage} />
-            : <Pager page={itemPage} size={12} total={items.length} onPage={setItemPage} />}
+          {tab === 'aps'
+            ? <Pager page={apPage} size={10} total={apList.length} onPage={setApPage} />
+            : tab === 'ifs'
+              ? <Pager page={ifPage} size={10} total={netIfs.length} onPage={setIfPage} />
+              : <Pager page={itemPage} size={12} total={items.length} onPage={setItemPage} />}
         </div>
 
         {/* 关联事件 */}
         <div className="card">
           <div className="card-title">关联事件（最近 {events.length} 条）</div>
           {events.map((e: any) => (
-            <div key={e.eventid} className="ev-row">
+            <div key={e.eventid} className="ev-row" style={e.noise ? { opacity: 0.55 } : undefined}>
               <span className="ev-time">{fmtTime(e.clock)}</span>
               <Badge sev={e.severity} />
-              <span className="ev-msg" title={e.message}>{e.message}</span>
+              <span className="ev-msg" title={e.noise ? `${e.message}\n※ ${e.noise}` : e.message}>{e.message}</span>
+              {e.noise && <span className="tag-chip" title={e.noise}>哨兵值噪声</span>}
               {(e.tags || []).map((t: string) => <span key={t} className="tag-chip">{t}</span>)}
             </div>
           ))}

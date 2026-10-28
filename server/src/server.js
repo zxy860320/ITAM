@@ -168,12 +168,13 @@ app.get('/api/entities/:id/series', guard, async (req, res) => {
   const iface = String(req.query.iface || '');
   const dev = String(req.query.dev || '');
   const mnt = String(req.query.mnt || '');
+  const ap = String(req.query.ap || '');
   // dbmp 实体：本地真实采样差值序列（不调 Zabbix、不走 mockSeries 伪造）
   if (isDbmpId(req.params.id)) {
     return res.json({ series: dbmp.series(req.params.id.slice(5), range, till) });
   }
   try {
-    const s = await collector.series(req.params.id, range, till, iface, dev, mnt);
+    const s = await collector.series(req.params.id, range, till, iface, dev, mnt, ap);
     res.json({ series: s || mockSeries(ent, range, till, iface, dev, mnt) });
   } catch (e) {
     res.status(502).json({ error: String(e.message || e), series: mockSeries(ent, range, till, iface, dev, mnt) });

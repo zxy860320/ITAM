@@ -116,13 +116,21 @@ function buildCols(domain: string, rows: any[]): Col[] {
     cols.push({ key: 'conn', th: '连接数', w: '12%', cls: 'mono num' });
     cols.push({ key: 'threads', th: '活跃线程', w: '8%', cls: 'mono num' });
     cols.push({ key: 'qps', th: 'QPS', w: '10%', cls: 'mono num' });
+  } else if (domain === 'network' && any(r => r.wlan)) {
+    // 无线控制器（AC）：AP 状态汇总 + 接入用户数（区别于交换机的 CPU/内存列）
+    cols.push({ key: 'ap', th: 'AP（正常/异常/总数）', w: '16%', cls: 'mono' });
+    cols.push({ key: 'wlanUsers', th: '接入用户(2.4G/5G)', w: '16%', cls: 'mono num' });
+    if (!empty && any(r => !r.wlan && (r.cpu != null || r.mem != null))) {
+      cols.push({ key: 'cpu', th: 'CPU', w: '12%' });
+      cols.push({ key: 'mem', th: '内存', w: '12%' });
+    }
   } else {
     cols.push({ key: 'cpu', th: 'CPU', w: '18%' });
     cols.push({ key: 'mem', th: '内存', w: '18%' });
     if (!empty && any(r => r.disk != null)) cols.push({ key: 'disk', th: '磁盘', w: '8%', cls: 'mono num' });
   }
   const sparkKey = domain === 'service' ? 'rtSpark' : domain === 'database' ? 'qpsSpark' : 'cpuSpark';
-  if (!empty && any(r => r[sparkKey]?.length)) cols.push({ key: 'spark', th: '趋势', w: '10%' });
+  if (!empty && any(r => !r.wlan && r[sparkKey]?.length)) cols.push({ key: 'spark', th: '趋势', w: '10%' });
   cols.push({ key: 'problems', th: '告警', w: '6%', cls: 'num' });
   cols.push({ key: 'availability', th: '状态', w: '9%' });
   return cols;
@@ -169,10 +177,28 @@ function cell(key: string, r: any, domain: string) {
       : <span style={{ color: 'var(--text-3)' }}>—</span>;
     case 'cpu': return r.cpu == null ? <span style={{ color: 'var(--text-3)' }}>—</span> : <Meter value={r.cpu} />;
     case 'mem': return r.mem == null ? <span style={{ color: 'var(--text-3)' }}>—</span> : <Meter value={r.mem} />;
+    case 'ap': {
+      if (!r.wlan) return <span style={{ color: 'var(--text-3)' }}>—</span>;
+      const st = r.apStates || {};
+      const normal = (st.Normal || 0), idle = (st.Idle || 0);
+      const fault = (r.apTotal ?? 0) - normal - idle;
+      return <span title={`Normal=${normal}${idle ? ` Idle=${idle}(备机待机)` : ''} 异常=${fault}`}>
+        <span style={{ color: 'var(--sev-healthy)' }}>{normal}</span>/<span style={{ color: fault ? 'var(--sev-critical)' : 'var(--text-3)' }}>{fault}</span>/{r.apTotal ?? '—'}
+      </span>;
+    }
+    case 'wlanUsers': {
+      if (!r.wlan) return <span style={{ color: 'var(--text-3)' }}>—</span>;
+      return r.wlanUsers != null
+        ? <span title={`2.4G: ${r.wlanUsers24 ?? '—'} · 5G: ${r.wlanUsers5 ?? '—'}`}>{r.wlanUsers} <span style={{ color: 'var(--text-3)', fontSize: 11 }}>({r.wlanUsers24 ?? '—'}/{r.wlanUsers5 ?? '—'})</span></span>
+        : '—';
+    }
     case 'disk': return r.disk == null ? '—' : `${r.disk}%`;
     case 'spark': return <Spark data={domain === 'service' ? r.rtSpark : domain === 'database' ? r.qpsSpark : r.cpuSpark} w={86} color={DOM_COLOR[domain]} />;
     case 'problems':
-      return <span className="mono" style={{ color: r.problems ? 'var(--sev-critical)' : 'var(--text-3)' }}>{r.problems || '—'}</span>;
+      return <span className="mono" style={{ color: r.problems ? 'var(--sev-critical)' : 'var(--text-3)' }}
+        title={r.noiseProblems ? `另有 ${r.noiseProblems} 条哨兵值噪声告警（传感器不可读等），未计入` : undefined}>
+        {r.problems || '—'}{r.noiseProblems ? <span style={{ color: 'var(--text-3)', fontSize: 10 }}> ~{r.noiseProblems}</span> : null}
+      </span>;
     case 'availability': return <Badge sev={r.availability} />;
     default: return null;
   }
