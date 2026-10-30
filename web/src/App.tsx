@@ -12,6 +12,7 @@ import LinkReviewPage from './pages/LinkReviewPage';
 import FlowPathPage from './pages/FlowPathPage';
 import SourcePage from './pages/SourcePage';
 import NotifyPage from './pages/NotifyPage';
+import OpsPage from './pages/OpsPage';
 import SystemPage from './pages/SystemPage';
 
 const NAV = [
@@ -28,6 +29,7 @@ const NAV = [
   { group: '平台管理', items: [
     { key: 'source', label: '监控源对接', hash: '#/source' },
     { key: 'notify', label: '告警出口', hash: '#/notify' },
+    { key: 'ops', label: '设备操作', hash: '#/ops', color: 'var(--dom-service)' },
     { key: 'system', label: '系统管理', hash: '#/system' },
   ]},
 ];
@@ -44,6 +46,7 @@ const PAGES: Record<string, [React.FC<any>, string]> = {
   service: [ServicePage, '服务监控'],
   source: [SourcePage, '监控源对接'],
   notify: [NotifyPage, '告警出口'],
+  ops: [OpsPage, '设备操作'],
   system: [SystemPage, '系统管理'],
 };
 

@@ -296,9 +296,27 @@ export class Notifier {
     } finally { this._busy = false; }
   }
 
+  // ---------- 主动消息（非告警差分链路，如设备配置变更通知） ----------
+  // 只走 enabled 通道；每通道记审计日志
+  async sendAdhoc(title, text) {
+    if (!this.cfg.enabled || !this.cfg.channels.some(c => c.enabled)) return { skipped: 'disabled' };
+    const results = [];
+    for (const ch of this.cfg.channels) {
+      if (!ch.enabled) continue;
+      try {
+        await this._sendChannel(ch, { title, text });
+        this._logIt(ch, 'adhoc', 1, true);
+        results.push({ ch: ch.label, ok: true });
+      } catch (e) {
+        this._logIt(ch, 'adhoc', 1, false, String(e.message || e));
+        results.push({ ch: ch.label, ok: false, error: String(e.message || e) });
+      }
+    }
+    return { results };
+  }
+
   // ---------- 测试发送（配置页"测试"按钮） ----------
-  async testChannel(id) {
-    const ch = this.cfg.channels.find(c => c.id === id);
+  async testChannel(id) {    const ch = this.cfg.channels.find(c => c.id === id);
     if (!ch) throw new Error('通道不存在');
     const msg = {
       title: '【测试】IT运维监控平台告警出口',

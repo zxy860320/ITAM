@@ -17,5 +17,8 @@ server/data/notify.json
 server/data/notify_state.json
 # zCloud 采样缓存（运行时数据）
 server/data/dbmp_samples.json
+# 跳板机 MCP token 与设备配置备份全文（含设备密文），严禁入库
+server/data/ops.json
+server/data/backups/
 # playwright 调试产物
 .playwright-cli/

@@ -7,6 +7,7 @@ import { DbmpClient } from './collector/dbmpClient.js';
 import { summary, topProblems, eventTrend, listFilter, paginate, byDomain, DOMAIN_LABEL } from './collector/aggregate.js';
 import { GROUP_MAPPING } from './collector/mockData.js';
 import { Notifier } from './alerter/alerter.js';
+import { mountOps } from './ops/opsRoutes.js';
 
 const PORT = process.env.PORT || 8787;
 // 数据源开关：mock | zabbix（真实 Zabbix JSON-RPC 2.0）
@@ -320,6 +321,9 @@ app.post('/api/source/save', (req, res) => {
   persistSource();
   res.json({ ok: true, mode: collector.mode, freq: collector.freq, dbmp: DBMP });
 });
+
+// ---------- 设备操作（经跳板机 JumpServer MCP：配置备份/只读巡检） ----------
+mountOps(app, { notifier });
 
 // ---------- 系统管理 ----------
 app.get('/api/system', (req, res) => {

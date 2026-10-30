@@ -39,6 +39,20 @@ export const api = {
   notifySave: (body: any) => post('/notify/save', body),
   notifyTest: (id: string) => post('/notify/test', { id }),
   system: () => get('/system'),
+  // 设备操作（经跳板机 JumpServer MCP）
+  opsConfig: () => get('/ops/config'),
+  opsConfigSave: (body: any) => post('/ops/config/save', body),
+  opsConfigTest: () => post('/ops/config/test'),
+  opsAssets: (qs: Record<string, any>) =>
+    get('/ops/assets?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
+  opsExec: (body: any) => post('/ops/exec', body),
+  opsBackups: (qs: Record<string, any>) =>
+    get('/ops/backups?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
+  opsBackup: (id: string) => get(`/ops/backups/${id}`),
+  opsChanges: (qs: Record<string, any> = {}) =>
+    get('/ops/changes?' + new URLSearchParams(Object.entries(qs).map(([k, v]) => [k, String(v)]))),
+  opsSessions: (qs: Record<string, any> = {}) =>
+    get('/ops/sessions?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
 };
 
 /* ---------- topology-svc（:8790，经 vite 代理 /topo-api → /api） ---------- */
