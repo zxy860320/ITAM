@@ -4,6 +4,7 @@ import { useNow } from './components/common';
 import Dashboard from './pages/Dashboard';
 import ServerPage from './pages/ServerPage';
 import NetworkPage from './pages/NetworkPage';
+import WirelessPage from './pages/WirelessPage';
 import DatabasePage from './pages/DatabasePage';
 import ServicePage from './pages/ServicePage';
 import TopologyPage from './pages/TopologyPage';
@@ -21,6 +22,7 @@ const NAV = [
     { key: 'server',    label: '服务器监控', hash: '#/server',    color: 'var(--dom-server)' },
     { key: 'database',  label: '数据库监控', hash: '#/database',  color: 'var(--dom-database)' },
     { key: 'network',   label: '网络设备监控', hash: '#/network', color: 'var(--dom-network)' },
+    { key: 'wlan',      label: '无线网络监控', hash: '#/wlan',    color: 'var(--dom-wlan)' },
     { key: 'topology',  label: '网络拓扑', hash: '#/topology',  color: 'var(--dom-network)' },
     { key: 'link-review', label: '链路审核', hash: '#/link-review', color: 'var(--dom-network)' },
     { key: 'flow-path', label: '流量路径走势', hash: '#/flow-path', color: 'var(--dom-network)' },
@@ -39,6 +41,7 @@ const PAGES: Record<string, [React.FC<any>, string]> = {
   server: [ServerPage, '服务器监控'],
   database: [DatabasePage, '数据库监控'],
   network: [NetworkPage, '网络设备监控'],
+  wlan: [WirelessPage, '无线网络监控'],
   topology: [TopologyPage, '网络拓扑'],
   'topology-full': [TopologyFullPage, '网络架构全览'],
   'link-review': [LinkReviewPage, '链路审核'],

@@ -1,6 +1,7 @@
 import React from 'react';
 import { api } from '../api';
 import { fmtTime } from '../components/common';
+import { DiffView } from '../components/BackupPanel';
 
 /** 设备操作页：经跳板机（JumpServer MCP）对纳管设备执行白名单命令模板。
  *  第一期：交换机配置备份（只读抓取配置全文→入库→指纹变更检测→告警出口推送）。
@@ -22,6 +23,8 @@ export default function OpsPage() {
 
   const [backups, setBackups] = React.useState<any[]>([]);
   const [detail, setDetail] = React.useState<any>(null);
+  const [bkPicked, setBkPicked] = React.useState<string[]>([]);
+  const [diff, setDiff] = React.useState<any>(null);
 
   const load = React.useCallback(() => {
     api.opsConfig().then(d => {
@@ -72,6 +75,15 @@ export default function OpsPage() {
     setDetail({ loading: true } as any);
     try { setDetail(await api.opsBackup(id)); }
     catch (e: any) { setDetail({ error: String(e.message || e) }); }
+  }
+  function toggleBk(id: string) {
+    setBkPicked(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id].slice(-2));
+  }
+  async function comparePicked() {
+    if (bkPicked.length !== 2) return;
+    setDiff({ loading: true });
+    try { setDiff(await api.opsDiff(bkPicked[0], bkPicked[1])); }
+    catch (e: any) { setDiff({ error: String(e.message || e) }); }
   }
 
   if (!cfg) return <div style={{ color: 'var(--text-3)' }}>加载中…</div>;
@@ -160,14 +172,29 @@ export default function OpsPage() {
         <div className="card-title">配置备份历史<span className="spacer" />
           <span style={{ fontSize: 11, color: 'var(--text-3)' }}>变更 = 与同设备上一份指纹(sha1)不同；变更已推送告警出口</span>
         </div>
+        <div className="toolbar" style={{ margin: '0 0 8px' }}>
+          <button className="btn primary" style={{ padding: '4px 12px', fontSize: 11 }} onClick={comparePicked} disabled={bkPicked.length !== 2}>
+            比对所选（{bkPicked.length}/2）
+          </button>
+          <span style={{ fontSize: 11, color: 'var(--text-3)' }}>勾选任意两份备份做行级差异比对（脱敏后展示）</span>
+        </div>
+        {diff && (
+          <div style={{ marginBottom: 10 }}>
+            {diff.loading && <div style={{ color: 'var(--text-3)', fontSize: 12 }}>比对中…</div>}
+            {diff.error && <div style={{ color: 'var(--sev-critical)', fontSize: 12 }}>{diff.error}</div>}
+            {diff.lines && <DiffView diff={diff} onClose={() => setDiff(null)} />}
+          </div>
+        )}
         <table className="data nowrap">
           <thead><tr>
+            <th style={{ width: 30 }} />
             <th>时间</th><th>设备</th><th>命令</th><th className="num">字节</th><th>指纹</th><th>变更</th><th>操作</th>
           </tr></thead>
           <tbody>
-            {backups.length === 0 && <tr><td colSpan={7} className="empty-tip">暂无备份记录——选择设备与"配置备份"模板执行一次</td></tr>}
+            {backups.length === 0 && <tr><td colSpan={8} className="empty-tip">暂无备份记录——选择设备与"配置备份"模板执行一次</td></tr>}
             {backups.map(b => (
               <tr key={b.id}>
+                <td><input type="checkbox" style={{ width: 'auto' }} checked={bkPicked.includes(b.id)} onChange={() => toggleBk(b.id)} /></td>
                 <td className="mono">{fmtTime(b.at)}</td>
                 <td>{b.assetName}</td>
                 <td className="mono" style={{ fontSize: 11 }}>{b.command}</td>

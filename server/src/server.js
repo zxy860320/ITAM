@@ -248,7 +248,12 @@ app.get('/api/events', guard, (req, res) => {
   let evs = [...ds.events];
   if (req.query.severity) evs = evs.filter(e => e.severity === req.query.severity);
   if (req.query.status) evs = evs.filter(e => e.status === req.query.status);
-  if (req.query.domain) evs = evs.filter(e => e.domain === req.query.domain);
+  // wlan 伪域过滤：事件本身不带 wlan 标记，按主机集合映射（与列表拆分口径一致）
+  const dq = String(req.query.domain || '');
+  if (dq === 'wlan' || dq === 'network') {
+    const wlanIds = new Set(collector.data.hosts.filter(h => h.domain === 'network' && h.wlan).map(h => h.hostid));
+    evs = evs.filter(e => e.domain === 'network' && (dq === 'wlan' ? wlanIds.has(e.hostid) : !wlanIds.has(e.hostid)));
+  } else if (dq) evs = evs.filter(e => e.domain === dq);
   res.json(paginate(evs.sort((a, b) => b.clock - a.clock), Number(req.query.page || 1), Number(req.query.size || 20)));
 });
 

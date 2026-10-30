@@ -1,6 +1,7 @@
 import React from 'react';
 import { api, usePoll } from '../api';
 import { Badge, Pager, fmtTime, ago, DOM_COLOR } from '../components/common';
+import BackupPanel from '../components/BackupPanel';
 import { Chart, darkBase, axisStyle } from '../components/Chart';
 
 /* ---------- 格式化 ---------- */
@@ -247,6 +248,9 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
             </div>
           )}
         </div>
+
+        {/* 配置备份（网络设备/无线AC）：一键备份 + 历史 + 差异比对 */}
+        {entity.domain === 'network' && <BackupPanel entity={entity} />}
 
         {/* 趋势：指标切换 + 时间窗 + 历史回看 */}
         <div className="card" style={{ marginBottom: 12 }}>

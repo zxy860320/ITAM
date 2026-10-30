@@ -1,10 +1,11 @@
 // 聚合层：原始数据集 → 各页面所需视图模型
 const SEV_RANK = { info: 0, warning: 1, severe: 2, critical: 3 };
-export const DOMAIN_LABEL = { server: '服务器', database: '数据库', network: '网络设备', service: '服务' };
+export const DOMAIN_LABEL = { server: '服务器', database: '数据库', network: '网络设备', wlan: '无线网络', service: '服务' };
 
 export function byDomain(ds) {
-  const out = { server: [], network: [], database: [], service: [] };
-  ds.hosts.forEach(h => out[h.domain].push(h));
+  // wlan = 无线伪域：采集层仍归 network（wlan=true 标记），视图层拆出独立分组
+  const out = { server: [], network: [], wlan: [], database: [], service: [] };
+  ds.hosts.forEach(h => out[h.domain === 'network' && h.wlan ? 'wlan' : h.domain].push(h));
   out.service = ds.services;
   return out;
 }
@@ -52,7 +53,9 @@ export function eventTrend(ds, hours = 24) {
 
 export function listFilter(qs, { domain, q, status, availability, severity }) {
   let out = qs;
-  if (domain) out = out.filter(x => x.domain === domain);
+  if (domain === 'network') out = out.filter(x => x.domain === 'network' && !x.wlan);
+  else if (domain === 'wlan') out = out.filter(x => x.domain === 'network' && x.wlan);
+  else if (domain) out = out.filter(x => x.domain === domain);
   if (q) out = out.filter(x => x.name.toLowerCase().includes(q.toLowerCase()) || (x.label || '').includes(q) || (x.ip || '').includes(q));
   if (status) out = out.filter(x => x.status === status);
   if (availability) out = out.filter(x => x.availability === availability);

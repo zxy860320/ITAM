@@ -1,7 +1,7 @@
 import React from 'react';
 
 export const SEV_LABEL: Record<string, string> = { critical: '紧急', severe: '严重', warning: '警告', info: '信息', healthy: '健康' };
-export const DOM_COLOR: Record<string, string> = { server: 'var(--dom-server)', database: 'var(--dom-database)', network: 'var(--dom-network)', service: 'var(--dom-service)' };
+export const DOM_COLOR: Record<string, string> = { server: 'var(--dom-server)', database: 'var(--dom-database)', network: 'var(--dom-network)', wlan: 'var(--dom-wlan)', service: 'var(--dom-service)' };
 export const DOM_LABEL: Record<string, string> = { server: '服务器', database: '数据库', network: '网络设备', service: '服务' };
 
 export function Badge({ sev }: { sev: string }) {

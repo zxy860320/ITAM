@@ -1,6 +1,6 @@
 import React from 'react';
 import { api, usePoll } from '../api';
-import { Badge, Spark, Meter, Pager, ago, DOM_COLOR } from '../components/common';
+import { Badge, Spark, Meter, Pager, ago, fmtTime, DOM_COLOR } from '../components/common';
 import EntityDetailDrawer from './EntityDetailDrawer';
 import DbDetailDrawer from './DbDetailDrawer';
 
@@ -10,10 +10,54 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
   const [avail, setAvail] = React.useState('');
   const [page, setPage] = React.useState(1);
   const [detail, setDetail] = React.useState<any>(null);
+  // 行内一键配置备份（network/wlan 域）：busy 按设备 IP 记状态，meta 缓存各设备最近备份时间
+  const canBackup = domain === 'network' || domain === 'wlan';
+  const [bkBusy, setBkBusy] = React.useState<Record<string, string>>({});
+  const [bkMsg, setBkMsg] = React.useState<{ ip: string; ok: boolean; text: string } | null>(null);
+  const [bkMeta, setBkMeta] = React.useState<Record<string, any> | null>(null);
+  const [bkTick, setBkTick] = React.useState(0);
 
   const qs = { domain, q, availability: avail, page, size: 20 };
   const { data, reload } = usePoll(() => api.entities(qs), 20000, JSON.stringify(qs));
   const { data: evs } = usePoll(() => api.events({ domain, size: 8 }), 20000, domain);
+  React.useEffect(() => {
+    if (!canBackup) return;
+    api.opsBackupsMeta().then(d => setBkMeta(d.byAsset || {})).catch(() => setBkMeta({}));
+  }, [canBackup, bkTick]);
+
+  async function backupRow(r: any) {
+    const ip = r.ip || r.name;
+    if (!ip || bkBusy[ip]) return;
+    setBkBusy(m => ({ ...m, [ip]: '备份中…' }));
+    setBkMsg(null);
+    try {
+      const res = await api.opsBackupNow({ asset: ip });
+      const b = res.backup;
+      setBkMsg({ ip, ok: true, text: b ? `${b.changed ? (b.prevSha1 == null ? '首次备份完成' : '备份完成（配置有变更）') : '备份完成（与上份一致）'}` : '执行完成' });
+      setBkTick(x => x + 1);
+    } catch (e: any) {
+      setBkMsg({ ip, ok: false, text: String(e.message || e).slice(0, 80) });
+    }
+    setBkBusy(m => { const n = { ...m }; delete n[ip]; return n; });
+  }
+  function backupCell(r: any) {
+    const ip = r.ip || r.name;
+    const busy = bkBusy[ip];
+    const meta = bkMeta?.[ip];
+    const msg = bkMsg && bkMsg.ip === ip;
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={e => e.stopPropagation()}>
+        <button className="btn" style={{ padding: '3px 10px', fontSize: 11 }}
+          onClick={() => backupRow(r)} disabled={!!busy || !ip}>
+          {busy ? '备份中…' : '备份'}
+        </button>
+        {msg
+          ? <span style={{ fontSize: 10, color: bkMsg!.ok ? 'var(--sev-healthy)' : 'var(--sev-critical)' }} title={bkMsg!.text}>{bkMsg!.ok ? '✔' : '✘'}</span>
+          : meta ? <span style={{ fontSize: 10, color: 'var(--text-3)' }} title={`最近备份 ${fmtTime(meta.at)} · ${meta.bytes}B`}>{ago(meta.at)}</span>
+          : null}
+      </span>
+    );
+  }
 
   const stats = summary?.domains?.find((d: any) => d.domain === domain);
 
@@ -53,18 +97,18 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
             <button className="btn" onClick={reload}>刷新</button>
           </div>
           <table className="data fixed nowrap">
-            <Colgroup cols={buildCols(domain, data?.rows || [])} />
+            <Colgroup cols={buildCols(domain, data?.rows || [], canBackup)} />
             <thead>
-              <tr>{buildCols(domain, data?.rows || []).map(c => <th key={c.key} className={c.cls}>{c.th}</th>)}</tr>
+              <tr>{buildCols(domain, data?.rows || [], canBackup).map(c => <th key={c.key} className={c.cls}>{c.th}</th>)}</tr>
             </thead>
             <tbody>
               {(data?.rows || []).map((r: any) => (
                 <tr key={r.hostid || r.serviceid} style={{ cursor: 'pointer' }} onClick={() => setDetail(r)}>
-                  {buildCols(domain, data?.rows || []).map(c => <td key={c.key} className={c.cls}>{cell(c.key, r, domain)}</td>)}
+                  {buildCols(domain, data?.rows || [], canBackup).map(c => <td key={c.key} className={c.cls}>{c.key === 'backup' ? backupCell(r) : cell(c.key, r, domain)}</td>)}
                 </tr>
               ))}
               {(!data?.rows?.length) && (
-                <tr><td colSpan={buildCols(domain, []).length} className="empty-tip">
+                <tr><td colSpan={buildCols(domain, [], canBackup).length} className="empty-tip">
                   {domain === 'database'
                     ? '该域暂无监控对象 — zCloud(dbmp) 北向API 未返回实例（检查 对接页 数据库数据源状态）'
                     : '该域暂无监控对象 — 在 Zabbix 中为相关主机挂载对应模板后会自动归入本域'}
@@ -99,7 +143,7 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
 /* ---------- 列定义：按当页实际数据裁剪空列，百分比列宽自适应卡片宽度 ---------- */
 type Col = { key: string; th: string; w?: string; cls?: string };
 
-function buildCols(domain: string, rows: any[]): Col[] {
+function buildCols(domain: string, rows: any[], canBackup = false): Col[] {
   const any = (f: (r: any) => any) => rows.some(f);
   const empty = rows.length === 0;
   const cols: Col[] = [{ key: 'name', th: '名称', w: '22%' }];
@@ -116,23 +160,24 @@ function buildCols(domain: string, rows: any[]): Col[] {
     cols.push({ key: 'conn', th: '连接数', w: '12%', cls: 'mono num' });
     cols.push({ key: 'threads', th: '活跃线程', w: '8%', cls: 'mono num' });
     cols.push({ key: 'qps', th: 'QPS', w: '10%', cls: 'mono num' });
-  } else if (domain === 'network' && any(r => r.wlan)) {
+  } else if (domain === 'wlan' || (domain === 'network' && any(r => r.wlan))) {
     // 无线控制器（AC）：AP 状态汇总 + 接入用户数（区别于交换机的 CPU/内存列）
-    cols.push({ key: 'ap', th: 'AP（正常/异常/总数）', w: '16%', cls: 'mono' });
-    cols.push({ key: 'wlanUsers', th: '接入用户(2.4G/5G)', w: '16%', cls: 'mono num' });
+    cols.push({ key: 'ap', th: 'AP（正常/异常/总数）', w: '14%', cls: 'mono' });
+    cols.push({ key: 'wlanUsers', th: '接入用户(2.4G/5G)', w: '14%', cls: 'mono num' });
     if (!empty && any(r => !r.wlan && (r.cpu != null || r.mem != null))) {
       cols.push({ key: 'cpu', th: 'CPU', w: '12%' });
       cols.push({ key: 'mem', th: '内存', w: '12%' });
     }
   } else {
-    cols.push({ key: 'cpu', th: 'CPU', w: '18%' });
-    cols.push({ key: 'mem', th: '内存', w: '18%' });
+    cols.push({ key: 'cpu', th: 'CPU', w: canBackup ? '14%' : '18%' });
+    cols.push({ key: 'mem', th: '内存', w: canBackup ? '14%' : '18%' });
     if (!empty && any(r => r.disk != null)) cols.push({ key: 'disk', th: '磁盘', w: '8%', cls: 'mono num' });
   }
   const sparkKey = domain === 'service' ? 'rtSpark' : domain === 'database' ? 'qpsSpark' : 'cpuSpark';
-  if (!empty && any(r => !r.wlan && r[sparkKey]?.length)) cols.push({ key: 'spark', th: '趋势', w: '10%' });
-  cols.push({ key: 'problems', th: '告警', w: '6%', cls: 'num' });
-  cols.push({ key: 'availability', th: '状态', w: '9%' });
+  if (!empty && any(r => !r.wlan && r[sparkKey]?.length)) cols.push({ key: 'spark', th: '趋势', w: canBackup ? '9%' : '10%' });
+  cols.push({ key: 'problems', th: '告警', w: '5%', cls: 'num' });
+  cols.push({ key: 'availability', th: '状态', w: '8%' });
+  if (canBackup) cols.push({ key: 'backup', th: '备份', w: '12%' });
   return cols;
 }
 

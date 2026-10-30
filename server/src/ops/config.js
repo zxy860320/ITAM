@@ -53,6 +53,68 @@ export function cleanPaging(text) {
   return out.trim();
 }
 
+// 行级差异（LCS）：对两份原始清洗后配置计算 diff——行内容出接口前逐行脱敏。
+// 注意：password/community 行脱敏后两侧相同，密码"变更"只体现在行数/位置上，值永不外泄。
+export function diffLines(textA, textB, ctx = 3, maxOut = 6000) {
+  const A = String(textA).replace(/\r/g, '').split('\n');
+  const B = String(textB).replace(/\r/g, '').split('\n');
+  let s = 0; while (s < A.length && s < B.length && A[s] === B[s]) s++;           // 公共前缀
+  let eA = A.length, eB = B.length;
+  while (eA > s && eB > s && A[eA - 1] === B[eB - 1]) { eA--; eB--; }             // 公共后缀
+  const a = A.slice(s, eA), b = B.slice(s, eB);
+  let ops;
+  if (!a.length && !b.length) return { lines: [], added: 0, removed: 0, truncated: false };
+  if (a.length * b.length > 4e6) {
+    // 超长且中段全不同：退化为整段替换（避免 DP 内存爆炸）
+    ops = [...a.map(l => ({ t: '-', l })), ...b.map(l => ({ t: '+', l }))];
+  } else {
+    const n = a.length, m = b.length, W = m + 1;
+    const dp = new Uint32Array((n + 1) * W);
+    for (let i = n - 1; i >= 0; i--)
+      for (let j = m - 1; j >= 0; j--)
+        dp[i * W + j] = a[i] === b[j] ? dp[(i + 1) * W + j + 1] + 1 : Math.max(dp[(i + 1) * W + j], dp[i * W + j + 1]);
+    ops = [];
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) { ops.push({ t: ' ', l: a[i] }); i++; j++; }
+      else if (dp[(i + 1) * W + j] >= dp[i * W + j + 1]) { ops.push({ t: '-', l: a[i] }); i++; }
+      else { ops.push({ t: '+', l: b[j] }); j++; }
+    }
+    while (i < n) ops.push({ t: '-', l: a[i++] });
+    while (j < m) ops.push({ t: '+', l: b[j++] });
+  }
+  // 压缩输出：只保留变更块 ±ctx 行上下文
+  const keep = new Array(ops.length).fill(false);
+  let added = 0, removed = 0;
+  ops.forEach((o, idx) => {
+    if (o.t === ' ') return;
+    keep[idx] = true;
+    if (o.t === '+') added++; else removed++;
+    for (let c = 1; c <= ctx; c++) {
+      if (idx - c >= 0 && ops[idx - c].t === ' ') keep[idx - c] = true;
+      if (idx + c < ops.length && ops[idx + c].t === ' ') keep[idx + c] = true;
+    }
+  });
+  const out = [];
+  let truncated = false;
+  const preFrom = Math.max(0, s - 2);
+  for (let k = preFrom; k < s && out.length < maxOut; k++)
+    out.push({ t: ' ', l: A[k], na: k + 1, nb: k + 1 });          // 前缀尾部 2 行定位上下文
+  let pa = s, pb = s;                                            // 中段已消费的 A/B 行数（=行号）
+  for (let idx = 0; idx < ops.length; idx++) {
+    const o = ops[idx];
+    if (o.t === ' ') { pa++; pb++; }
+    else if (o.t === '-') pa++;
+    else pb++;
+    if (!keep[idx]) continue;
+    if (out.length >= maxOut) { truncated = true; break; }
+    out.push({ t: o.t, l: o.l, na: o.t === '+' ? null : pa, nb: o.t === '-' ? null : pb });
+  }
+  if (!truncated) for (let k = 0; k < 2 && eA + k < A.length && out.length < maxOut; k++)
+    out.push({ t: ' ', l: A[eA + k], na: eA + k + 1, nb: eB + k + 1 });
+  return { lines: out, added, removed, truncated };
+}
+
 export class OpsStore {
   constructor({ cfgFile, backupDir }) {
     this.cfgFile = cfgFile;

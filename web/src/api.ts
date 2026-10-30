@@ -46,6 +46,9 @@ export const api = {
   opsAssets: (qs: Record<string, any>) =>
     get('/ops/assets?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
   opsExec: (body: any) => post('/ops/exec', body),
+  opsBackupNow: (body: { asset: string; tpl?: string }) => post('/ops/backup', body),
+  opsBackupsMeta: () => get('/ops/backups/meta'),
+  opsDiff: (a: string, b: string) => get(`/ops/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
   opsBackups: (qs: Record<string, any>) =>
     get('/ops/backups?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
   opsBackup: (id: string) => get(`/ops/backups/${id}`),
