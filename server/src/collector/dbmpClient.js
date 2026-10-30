@@ -68,6 +68,14 @@ export class DbmpClient {
         counts[t] = { n: list.length };
         for (const it of list) assets.push({ ...it, _dbType: t });
       }
+      // 六库型全失败＝北向API 完全不可达：必须升为整体错误（徽标转"异常"、页面显示原因），
+      // 否则每库型 catch 吞错会让 lastSync/syncCount 照常滚动，前端看不出断连。
+      const allFailed = DB_TYPES.every(t => counts[t].error);
+      if (allFailed) {
+        this.counts = counts;
+        this.lastError = `北向API不可达（6/6 库型失败）：${counts[DB_TYPES[0]].error}`;
+        return { ok: false, at: ts, error: this.lastError };
+      }
       const infoRows = [];
       const gkeys = new Set(assets.map(a => `${a._dbType}|${a.groupId || a.clusterId}`));
       for (const gk of gkeys) {

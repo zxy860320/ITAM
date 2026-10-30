@@ -136,13 +136,16 @@ export default function SourcePage() {
         {data?.dbmp?.counts && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
             {Object.entries(data.dbmp.counts as Record<string, any>).map(([t, c]: any) => (
-              <span key={t} className={`badge ${c.error ? 'critical' : c.n ? 'healthy' : 'info'}`}><i className="bdot" />{t} · {c.n}{c.error ? ' ✘' : ''}</span>
+              <span key={t} title={c.error || ''} className={`badge ${c.error ? 'critical' : c.n ? 'healthy' : 'info'}`}><i className="bdot" />{t} · {c.n}{c.error ? ' ✘' : ''}</span>
             ))}
           </div>
         )}
-        {data?.dbmp?.lastError && (
-          <div className="mono" style={{ fontSize: 12, color: 'var(--sev-critical)', marginBottom: 8 }}>最近错误：{data.dbmp.lastError}</div>
-        )}
+        {(() => {
+          // 整体异常（lastError）或任一库型的请求错误都显式展示，便于现场直接定位
+          const cntErr = Object.values((data?.dbmp?.counts || {}) as Record<string, any>).find(c => c.error)?.error || null;
+          const msg = data?.dbmp?.lastError || cntErr;
+          return msg ? <div className="mono" style={{ fontSize: 12, color: 'var(--sev-critical)', marginBottom: 8 }}>最近错误：{msg}</div> : null;
+        })()}
         <div className="field">
           <label>北向API Base（免鉴权 customApi；留空或关闭则数据库域回到无数据态）</label>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
