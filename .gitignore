@@ -31,3 +31,5 @@ agent/.venv/
 agent/data/
 # playwright 调试产物
 .playwright-cli/
+# vite 运行时缓存
+.vite/

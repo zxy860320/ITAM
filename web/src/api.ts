@@ -135,6 +135,16 @@ async function tpost<T = any>(path: string, body?: any): Promise<T> {
   if (!r.ok) throw new Error(j?.error || `${path} -> ${r.status}`);
   return j;
 }
+async function tput<T = any>(path: string, body?: any): Promise<T> {
+  const r = await fetch(TBASE + path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error || `${path} -> ${r.status}`);
+  return j;
+}
 export const topoApi = {
   graph: (include = '') => tget(`/topology/graph${include ? '?include=' + include : ''}`),
   nodes: (qs: Record<string, any>) =>
@@ -156,6 +166,11 @@ export const topoApi = {
   pathtrace: (src: string, dst: string) => tget(`/topology/pathtrace?src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}`),
   rtStatus: () => tget('/topology/pathtrace/status'),
   rtRefresh: (node_ids?: string[]) => tpost('/topology/pathtrace/refresh', node_ids ? { node_ids } : {}),
+  // P3 全局共享布局（DB 唯一存储；auto/manual + position_locked）
+  layoutGet: () => tget('/topology/layout'),
+  layoutSave: (nodes: any[], operator: string) => tput('/topology/layout', { nodes, operator }),
+  layoutGroups: (groups: any[], operator: string) => tput('/topology/layout/groups', { groups, operator }),
+  layoutReset: (operator: string) => tpost('/topology/layout/reset', { operator }),
 };
 
 /** 通用轮询 hook；key 变化（筛选/翻页/搜索）立即重新拉取，不必等轮询周期 */

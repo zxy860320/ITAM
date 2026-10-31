@@ -1,0 +1,17 @@
+/* G6 全局拓扑 V2 画布样式（沿用深色主题色板） */
+.tg6-wrap { position: relative; height: 640px; border: 1px solid var(--hairline, #27272A); border-radius: 8px; overflow: hidden; background: #101013; }
+.tg6-host { width: 100%; height: 100%; }
+.tg6-host canvas { outline: none; }
+
+.g6-minimap { border: 1px solid #27272A; border-radius: 6px; background: rgba(20,20,23,.9); }
+
+.tg6-legend { position: absolute; left: 10px; bottom: 26px; background: rgba(20,20,23,.88); border: 1px solid #27272A; border-radius: 6px; padding: 6px 10px; font-size: 11px; color: #A1A1AA; pointer-events: none; }
+.tg6-legend .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+.tg6-legend .tc-swatch { display: inline-block; width: 18px; height: 0; border-top: 2px solid #4CAF50; }
+.tg6-legend .tc-swatch.half { border-top: 2px dashed #F2C94C; }
+
+.tg6-hint { position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 12px; font-size: 11px; color: #71717A; background: rgba(16,16,19,.85); border-top: 1px solid #1F1F23; pointer-events: none; }
+
+.tg6-modalmask { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 60; display: flex; align-items: center; justify-content: center; }
+.tg6-modal { width: min(560px, 92vw); background: var(--bg-card, #141417); border: 1px solid #27272A; border-radius: 10px; padding: 18px 20px; }
+.tg6-note { font-size: 12px; color: #A1A1AA; line-height: 1.7; margin-top: 8px; }

@@ -18,8 +18,9 @@ export function toMysqlSql(sql) {
     .replace(/INSERT (INTO|OR IGNORE INTO)\s+(\S+)\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)\s*ON CONFLICT\s*\(([^)]*)\) DO UPDATE SET ([\s\S]*?)(?=;?$)/gi,
       (m, into, table, cols, vals, _conf, sets) => {
         const setList = sets.split(',').map(s => {
-          const mm = /^\s*([\w.]+)\s*=\s*excluded\.(\w+)\s*$/.exec(s.trim());
-          if (mm) return `${mm[1]}=VALUES(${mm[2]})`;
+          // 允许列名带反引号（sqlite 侧为兼容 MySQL 保留字可能加反引号）
+          const mm = /^\s*`?([\w.]+)`?\s*=\s*excluded\.`?(\w+)`?\s*$/.exec(s.trim());
+          if (mm) return `\`${mm[1]}\`=VALUES(\`${mm[2]}\`)`;
           // 常量赋值（如 stale=0）
           return s.trim();
         }).join(', ');
@@ -180,6 +181,25 @@ const SQLITE_SCHEMA = `
     UNIQUE (interface_id, metric)
   );
   CREATE TABLE IF NOT EXISTS topo_meta (k TEXT PRIMARY KEY, v TEXT);
+  -- P3 全局共享布局：与设备真实属性分离；node_id 不设外键——
+  -- 设备删除后布局历史保留（物理删除仅由管理员显式 reset 触发）
+  CREATE TABLE IF NOT EXISTS topology_layout (
+    node_id         INTEGER PRIMARY KEY,
+    group_key       TEXT,                          -- 稳定区域 key（NULL=按默认规则推断）
+    x               REAL,
+    y               REAL,
+    layout_source   TEXT DEFAULT 'auto',           -- auto | manual（拖动后=manual）
+    position_locked INTEGER DEFAULT 0,             -- 1=固定位置，自动布局不得移动
+    updated_by      TEXT,
+    updated_at      INTEGER
+  );
+  CREATE TABLE IF NOT EXISTS topology_group (
+    group_key  TEXT PRIMARY KEY,                   -- internet|firewall|core|dc|office|prod|wireless|other
+    label      TEXT,
+    collapsed  INTEGER DEFAULT 0,
+    x          REAL, y REAL, w REAL, h REAL,       -- 区域容器人工位置/尺寸（NULL=按成员自动包络）
+    updated_at INTEGER
+  );
 `;
 
 // ---------- schema：MySQL（utf8mb4；speed_bps BIGINT——实测有 4e16 脏值；
@@ -268,5 +288,25 @@ const MYSQL_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS topo_meta (
     k VARCHAR(191) PRIMARY KEY,
     v LONGTEXT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  // P3 全局共享布局（无外键：设备删除后保留布局历史，见 sqlite 侧注释）。
+  // position_locked 在 MySQL 8.0.1+ 是保留字，sqlite 侧同款反引号写法保证 DML 双方言共用。
+  `CREATE TABLE IF NOT EXISTS topology_layout (
+    node_id         INT PRIMARY KEY,
+    group_key       VARCHAR(64),
+    x               DOUBLE,
+    y               DOUBLE,
+    layout_source   VARCHAR(16) DEFAULT 'auto',
+    \`position_locked\` INT DEFAULT 0,
+    updated_by      VARCHAR(128),
+    updated_at      BIGINT,
+    INDEX idx_layout_group (group_key)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS topology_group (
+    group_key  VARCHAR(64) PRIMARY KEY,
+    label      VARCHAR(128),
+    collapsed  INT DEFAULT 0,
+    x          DOUBLE, y DOUBLE, w DOUBLE, h DOUBLE,
+    updated_at BIGINT
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 ];

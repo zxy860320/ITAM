@@ -252,8 +252,8 @@ export default function TopologyPage(_: any) {
   );
 }
 
-/* ---------- 链路流量抽屉（数据源 Zabbix 接口计数器，与旧版一致） ---------- */
-function TrafficDrawer({ link, onClose }: { link: TopoLink; onClose: () => void }) {
+/* ---------- 链路流量抽屉（数据源 Zabbix 接口计数器，与旧版一致；V2 页复用） ---------- */
+export function TrafficDrawer({ link, onClose }: { link: TopoLink; onClose: () => void }) {
   const [range, setRange] = React.useState('6h');
   const { data } = usePoll(() => topoApi.traffic(link.link_id, range), 60000, `${link.link_id}|${range}`);
   const d = data?.data;

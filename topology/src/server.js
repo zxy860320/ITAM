@@ -312,6 +312,74 @@ app.get('/api/topology/graph', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ---------- P3 全局共享布局（布局与设备真实属性分离；DB 是布局唯一存储，G6 只是渲染器） ----------
+// 约定：layout_source auto|manual；position_locked 0|1；
+// 设备删除不级联删布局行（无外键），仅 /layout/reset 显式清空——布局历史不丢。
+app.get('/api/topology/layout', async (req, res) => {
+  try {
+    const nodes = await db.prepare('SELECT node_id, group_key, x, y, layout_source, `position_locked`, updated_by, updated_at FROM topology_layout').all();
+    const groups = await db.prepare('SELECT group_key, label, collapsed, x, y, w, h, updated_at FROM topology_group').all();
+    res.json({ data: { nodes, groups }, meta: { node_layout_count: nodes.length, group_count: groups.length } });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+// 保存布局：逐行 upsert（ON CONFLICT→toMysqlSql 翻译成 ON DUPLICATE KEY UPDATE）
+app.put('/api/topology/layout', async (req, res) => {
+  try {
+    const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+    const list = Array.isArray(req.body?.nodes) ? req.body.nodes : null;
+    if (!list) return res.status(400).json({ error: 'nodes 数组必填' });
+    if (list.length > 2000) return res.status(400).json({ error: '单批最多 2000 个节点' });
+    for (const nd of list) {
+      if (!Number.isFinite(+nd.node_id) || !Number.isFinite(+nd.x) || !Number.isFinite(+nd.y))
+        return res.status(400).json({ error: `节点 ${nd.node_id}：node_id/x/y 必须是有限数值` });
+      if (!['auto', 'manual'].includes(nd.layout_source))
+        return res.status(400).json({ error: `节点 ${nd.node_id}：layout_source 仅 auto|manual` });
+    }
+    const now = Math.floor(Date.now() / 1000);
+    let up = 0;
+    for (const nd of list) {
+      await db.prepare(`INSERT INTO topology_layout(node_id,group_key,x,y,layout_source,\`position_locked\`,updated_by,updated_at)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET group_key=excluded.group_key, x=excluded.x, y=excluded.y, layout_source=excluded.layout_source, \`position_locked\`=excluded.\`position_locked\`, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
+        .run(+nd.node_id, nd.group_key || null, +nd.x, +nd.y, nd.layout_source, nd.position_locked ? 1 : 0, String(operator), now);
+      up++;
+    }
+    res.json({ ok: true, upserted: up, at: now });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+// 区域（折叠态 / 容器人工位置）——同样逐行 upsert
+app.put('/api/topology/layout/groups', async (req, res) => {
+  try {
+    const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+    const list = Array.isArray(req.body?.groups) ? req.body.groups : null;
+    if (!list) return res.status(400).json({ error: 'groups 数组必填' });
+    if (list.length > 100) return res.status(400).json({ error: '单批最多 100 个区域' });
+    for (const g of list) {
+      if (!/^[a-z][a-z0-9_-]{0,63}$/.test(String(g.group_key || '')))
+        return res.status(400).json({ error: `group_key 非法：${g.group_key}（^[a-z][a-z0-9_-]{0,63}$）` });
+    }
+    const now = Math.floor(Date.now() / 1000);
+    let up = 0;
+    for (const g of list) {
+      const num = (v) => (v === null || v === undefined || !Number.isFinite(+v)) ? null : +v;
+      await db.prepare(`INSERT INTO topology_group(group_key,label,collapsed,x,y,w,h,updated_at)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(group_key) DO UPDATE SET label=excluded.label, collapsed=excluded.collapsed, x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h, updated_at=excluded.updated_at`)
+        .run(String(g.group_key), String(g.label || g.group_key), g.collapsed ? 1 : 0, num(g.x), num(g.y), num(g.w), num(g.h), now);
+      up++;
+    }
+    res.json({ ok: true, upserted: up, at: now });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+// 显式重置：唯一允许清除人工布局的入口（设计规则：管理员主动重置才清）
+app.post('/api/topology/layout/reset', async (req, res) => {
+  try {
+    const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+    const r1 = await db.prepare('DELETE FROM topology_layout').run();
+    const r2 = await db.prepare('DELETE FROM topology_group').run();
+    console.log(`[layout] reset by ${operator}: nodes=${r1.changes} groups=${r2.changes}`);
+    res.json({ ok: true, cleared: { layout_rows: r1.changes, group_rows: r2.changes } });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ---------- 发现 ----------
 app.post('/api/topology/discovery/run', async (req, res) => {
   if (discRunning) return res.status(409).json({ error: 'discovery running' });

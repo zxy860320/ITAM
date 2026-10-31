@@ -8,6 +8,7 @@ import WirelessPage from './pages/WirelessPage';
 import DatabasePage from './pages/DatabasePage';
 import ServicePage from './pages/ServicePage';
 import TopologyPage from './pages/TopologyPage';
+import TopologyPageV2 from './pages/TopologyPageV2';
 import TopologyFullPage from './pages/TopologyFullPage';
 import LinkReviewPage from './pages/LinkReviewPage';
 import FlowPathPage from './pages/FlowPathPage';
@@ -46,7 +47,8 @@ const PAGES: Record<string, [React.FC<any>, string]> = {
   database: [DatabasePage, '数据库监控'],
   network: [NetworkPage, '网络设备监控'],
   wlan: [WirelessPage, '无线网络监控'],
-  topology: [TopologyPage, '网络拓扑'],
+  topology: [TopologyPageV2, '网络拓扑（全局共享布局）'],
+  'topology-legacy': [TopologyPage, '网络拓扑 · 旧版（回滚通道）'],
   'topology-full': [TopologyFullPage, '网络架构全览'],
   'link-review': [LinkReviewPage, '链路审核'],
   'flow-path': [FlowPathPage, '流量路径走势'],
