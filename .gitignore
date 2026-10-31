@@ -26,5 +26,8 @@ server/data/ai_audit.jsonl
 server/data/assets.json
 server/data/cred.key
 server/data/asset_audit.jsonl
+# LangGraph agent 本地虚拟环境与 checkpoint（会话记忆，运行时数据）
+agent/.venv/
+agent/data/
 # playwright 调试产物
 .playwright-cli/

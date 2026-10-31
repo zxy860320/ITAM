@@ -67,7 +67,52 @@ export const api = {
   assetCredDelete: (assetId: string, credId: string) => post('/assets/cred/delete', { assetId, credId }),
   assetCredReveal: (assetId: string, credId: string) => post('/assets/cred/reveal', { assetId, credId }),
   assetsImportMonitor: () => post('/assets/import-monitor'),
+  // AI agent（LangGraph 服务，经 server 代理 /api/agent/*）
+  agentHealth: () => get('/agent/health'),
+  agentReset: (thread_id: string) => post('/agent/reset', { thread_id }),
 };
+
+/** 与 agent 服务通信的 SSE（POST /api/agent/chat，逐事件回调）。返回 abort 函数。 */
+export function agentChat(
+  threadId: string,
+  message: string,
+  onEvent: (ev: any) => void,
+): () => void {
+  const ac = new AbortController();
+  (async () => {
+    try {
+      const r = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thread_id: threadId, message }),
+        signal: ac.signal,
+      });
+      if (!r.ok || !r.body) {
+        const j = await r.json().catch(() => ({}) as any);
+        onEvent({ type: 'error', message: j?.error || `agent -> ${r.status}` });
+        onEvent({ type: 'done' });
+        return;
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+          const line = raw.split('\n').find(l => l.startsWith('data: '));
+          if (line) { try { onEvent(JSON.parse(line.slice(6))); } catch { /* 半截包忽略 */ } }
+        }
+      }
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') onEvent({ type: 'error', message: String(e?.message || e) });
+    }
+  })();
+  return () => ac.abort();
+}
 
 /* ---------- topology-svc（:8790，经 vite 代理 /topo-api → /api） ---------- */
 const TBASE = '/topo-api';

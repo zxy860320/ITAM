@@ -352,6 +352,40 @@ app.get('/api/ai/config', (req, res) => {
   });
 });
 
+// ---------- AI agent（LangGraph 服务）代理：前端同源访问 /api/agent/* → AGENT_URL(默认 :8791) ----------
+// 只做透传（含 SSE 流式不缓冲）；agent 服务不可达时回 503 JSON，前端据此显示配置指引。
+const AGENT_URL = (process.env.AGENT_URL || 'http://127.0.0.1:8791').replace(/\/+$/, '');
+async function proxyAgent(req, res, path) {
+  let upstream;
+  try {
+    upstream = await fetch(AGENT_URL + path, {
+      method: req.method,
+      headers: { 'Content-Type': 'application/json' },
+      body: req.method === 'GET' ? undefined : JSON.stringify(req.body || {}),
+      signal: AbortSignal.timeout(path === '/chat' ? 300_000 : 15_000),
+    });
+  } catch (e) {
+    res.status(503).json({ ok: false, error: `agent 服务不可达（${AGENT_URL}）：${e.message || e}` });
+    return;
+  }
+  const ct = upstream.headers.get('content-type') || 'application/json';
+  if (ct.includes('text/event-stream')) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no'); // nginx 侧不缓冲 SSE
+    res.flushHeaders?.();
+    try {
+      for await (const chunk of upstream.body) res.write(chunk);
+    } catch { /* 客户端断开 */ }
+    res.end();
+    return;
+  }
+  res.status(upstream.status).type(ct).send(await upstream.text());
+}
+app.post('/api/agent/chat', (req, res) => proxyAgent(req, res, '/chat'));
+app.post('/api/agent/reset', (req, res) => proxyAgent(req, res, '/reset'));
+app.get('/api/agent/health', (req, res) => proxyAgent(req, res, '/health'));
+
 // ---------- 系统管理 ----------
 app.get('/api/system', (req, res) => {
   res.json({

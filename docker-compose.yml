@@ -93,6 +93,27 @@ services:
     # ports:
     #   - "127.0.0.1:3002:8080"
 
+  # AI agent（LangGraph）：自研聊天后端的"大脑"，工具复用 server 的 /mcp（零改动）
+  # 模型走任意 OpenAI 兼容端点：内网 LiteLLM/Ollama/vLLM 均可（见 .env.example 注释；
+  # 容器内天然无宿主 HTTP_PROXY 污染，宿主机直接裸跑 agent 时需剥离代理 env）
+  agent:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.agent
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      ITYW_MCP_URL: http://server:8787/mcp
+      ITYW_MCP_TOKEN: ${ITYW_MCP_TOKEN:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    volumes:
+      - ./agent/data:/app/data   # LangGraph checkpoint（会话记忆），SQLite 单文件
+    # ports:
+    #   - "127.0.0.1:8791:8791"
+
   web:
     build:
       context: .

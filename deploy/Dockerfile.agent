@@ -1,0 +1,9 @@
+# ITYW AI agent（LangGraph）：仅依赖 agent/ 目录，工具经容器网络访问 server:8787/mcp
+FROM python:3.12-slim
+WORKDIR /app
+COPY agent/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY agent/app.py ./app.py
+ENV AGENT_HOST=0.0.0.0 AGENT_PORT=8791 AGENT_DB=/app/data/checkpoints.db
+EXPOSE 8791
+CMD ["python", "app.py"]
