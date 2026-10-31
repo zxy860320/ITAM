@@ -49,34 +49,35 @@ export function mountOps(app, { notifier }) {
     }
   });
 
-  // ---------- 资产清单（跳板机纳管的设备，前端选目标用） ----------
+  // ---------- 资产清单（跳板机纳管的设备，前端选目标用；/mcp 工具层同源复用） ----------
+  async function fetchJmsAssets(search) {
+    if (!jms.configured) throw Object.assign(new Error('跳板机 MCP 未配置'), { status: 400 });
+    if (!search && assetCache.data && Date.now() - assetCache.at < 300000) return { cached: true, ...assetCache.data };
+    const pages = [];
+    let total = 0;
+    for (let offset = 0; ; offset += 100) {
+      const r = await jms.listAssets({ search, limit: 100, offset });
+      total = r.count ?? total;
+      pages.push(...(r.results || []));
+      if (!r.results?.length || pages.length >= (r.count ?? 0)) break;
+      if (offset > 1000) break; // 防御
+    }
+    const slim = pages.map(a => ({
+      id: a.id, name: a.name, address: a.address,
+      platform: a.platform?.name || '', category: a.category?.label || '',
+      nodes: (a.nodes_display || [])[0] || '', accounts: a.accounts_amount ?? 0,
+      protocols: (a.protocols || []).map(p => `${p.name}:${p.port}`).join(','),
+    }));
+    const data = { count: total, assets: slim };
+    if (!search) { assetCache.at = Date.now(); assetCache.data = data; }
+    return data;
+  }
+
   app.get('/api/ops/assets', async (req, res) => {
-    if (!jms.configured) return res.status(400).json({ error: '跳板机 MCP 未配置' });
     try {
-      const search = String(req.query.search || '');
-      if (!search && assetCache.data && Date.now() - assetCache.at < 300000) {
-        return res.json({ cached: true, ...assetCache.data });
-      }
-      const pages = [];
-      let total = 0;
-      for (let offset = 0; ; offset += 100) {
-        const r = await jms.listAssets({ search, limit: 100, offset });
-        total = r.count ?? total;
-        pages.push(...(r.results || []));
-        if (!r.results?.length || pages.length >= (r.count ?? 0)) break;
-        if (offset > 1000) break; // 防御
-      }
-      const slim = pages.map(a => ({
-        id: a.id, name: a.name, address: a.address,
-        platform: a.platform?.name || '', category: a.category?.label || '',
-        nodes: (a.nodes_display || [])[0] || '', accounts: a.accounts_amount ?? 0,
-        protocols: (a.protocols || []).map(p => `${p.name}:${p.port}`).join(','),
-      }));
-      const data = { count: total, assets: slim };
-      if (!search) { assetCache.at = Date.now(); assetCache.data = data; }
-      res.json(data);
+      res.json(await fetchJmsAssets(String(req.query.search || '')));
     } catch (e) {
-      res.status(502).json({ error: String(e.message || e) });
+      res.status(e.status || 502).json({ error: String(e.message || e) });
     }
   });
 
@@ -208,6 +209,7 @@ export function mountOps(app, { notifier }) {
   // 内部句柄：供 /mcp 工具层直接复用（同一进程内调用，不绕 HTTP；安全口径与路由一致）
   return {
     jmsConfigured: () => jms.configured,
+    jmsAssets: (search = '') => fetchJmsAssets(String(search || '')),
     list: ({ assetKey, limit }) => store.list({ assetKey, limit }),
     meta: () => {
       const byAsset = {};

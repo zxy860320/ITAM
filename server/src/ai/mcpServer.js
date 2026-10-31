@@ -91,6 +91,14 @@ const TOOL_DEFS = [
       required: ['asset'],
     },
   },
+  {
+    name: 'query_jumpserver_assets',
+    description: '查询跳板机（JumpServer）纳管的资产清单——注意这与监控/Zabbix 纳管范围、资产台账(CMDB)都不同。q 按名称/IP 模糊搜索；不传 q 时返回总数与按类别/平台/节点的统计及前 100 条样本，传 q 返回匹配行（上限 100）。对比"哪些跳板机设备没被 Zabbix 监控"时：先取本工具清单，再用 device_detail/query_devices 按 IP 核对。',
+    inputSchema: {
+      type: 'object',
+      properties: { q: { type: 'string', description: '名称/IP 关键词，可空' } },
+    },
+  },
 ];
 
 // 资产台账工具（assets store 存在时启用）：只读台账元数据，永不返回账号密码
@@ -210,6 +218,21 @@ export function mountMcp(app, { collector, dbmp, ops, assets }) {
       const rows = assets.mcpList({ type: a.type, q: a.q });
       return { total: rows.length, assets: rows, note: '台账含凭据时 credCount>0；账号密码不通过本工具提供（安全红线）' };
     },
+    async query_jumpserver_assets(a) {
+      if (!ops.jmsConfigured()) throw new Error('跳板机 MCP 未配置，无法查询 JumpServer 资产');
+      const r = await ops.jmsAssets(a.q || '');
+      const countBy = (key) => {
+        const m = {};
+        for (const x of r.assets) { const k = x[key] || '未知'; m[k] = (m[k] || 0) + 1; }
+        return Object.fromEntries(Object.entries(m).sort((x, y) => y[1] - x[1]));
+      };
+      const rows = r.assets.slice(0, 100).map(x => ({ name: x.name, address: x.address, platform: x.platform, category: x.category, node: x.nodes, protocols: x.protocols }));
+      return {
+        total: r.count, returned: rows.length,
+        ...(a.q ? { assets: rows } : { byCategory: countBy('category'), byPlatform: countBy('platform'), byNode: countBy('nodes'), sample: rows }),
+        note: '这是 JumpServer 纳管清单（与 Zabbix 监控范围、资产台账 CMDB 相互独立）。对比纳管差异：逐台用 device_detail 按 address 查 Zabbix 是否在册。',
+      };
+    },
     async backup_device_now(a) {
       const r = await ops.backup(String(a.asset || '')); // ops.backup 内部含 未配置400/参数400/并发409 校验
       return {
@@ -234,7 +257,7 @@ export function mountMcp(app, { collector, dbmp, ops, assets }) {
           protocolVersion: params?.protocolVersion || PROTOCOL_FALLBACK,
           capabilities: { tools: {} },
           serverInfo: { name: 'ityw-monitor', version: '1.0.0' },
-          instructions: 'ITYW 运维监控平台工具集：监控总览/告警/设备查询走实时采集快照；备份与 diff 走跳板机备份库（内容已脱敏）。备份设备配置是只读操作可直接执行；本工具集不提供任何修改设备配置的能力。回答告警问题时优先引用 message 原文，不要编造数值。',
+          instructions: 'ITYW 运维监控平台工具集：监控总览/告警/设备查询走实时采集快照（Zabbix+dbmp）；备份与 diff 走跳板机备份库（内容已脱敏）；query_jumpserver_assets 查跳板机纳管清单；query_assets 查资产台账(CMDB)。备份设备配置是只读操作可直接执行；本工具集不提供任何修改设备配置的能力。回答告警问题时优先引用 message 原文，不要编造数值。',
         } });
       }
       if (method === 'ping') return wrap({ result: {} });
