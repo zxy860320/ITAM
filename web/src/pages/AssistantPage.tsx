@@ -31,55 +31,72 @@ export default function AssistantPage() {
 
 /* ---------------- 自研聊天（LangGraph） ---------------- */
 
+/* 会话状态提升到模块级：切菜单会卸载组件，但 SSE 流不中止、消息不丢——
+ * 回到本页时从断点继续渲染；只有「停止」「新会话」才主动断开。 */
+type Session = { threadId: string; msgs: Msg[]; busy: boolean; input: string; abort: null | (() => void); v: number };
+const session: Session = { threadId: `th-${Date.now().toString(36)}`, msgs: [], busy: false, input: '', abort: null, v: 0 };
+const sessionListeners = new Set<() => void>();
+function patchSession(fn: (s: Session) => void) {
+  fn(session); session.v++;
+  sessionListeners.forEach(f => f());
+}
+function useSession() {
+  const [, force] = React.useReducer((x: number) => x + 1, 0);
+  React.useEffect(() => {
+    sessionListeners.add(force);
+    return () => { sessionListeners.delete(force); };
+  }, []);
+  return session;
+}
+
 function AgentChat() {
-  const [threadId, setThreadId] = React.useState(() => `th-${Date.now().toString(36)}`);
-  const [msgs, setMsgs] = React.useState<Msg[]>([]);
-  const [input, setInput] = React.useState('');
-  const [busy, setBusy] = React.useState(false);
+  const s = useSession();
   const [health, setHealth] = React.useState<any>(null);
   const [hErr, setHErr] = React.useState('');
-  const abortRef = React.useRef<null | (() => void)>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     api.agentHealth().then(setHealth).catch(e => setHErr(String(e?.message || e)));
-    return () => abortRef.current?.();
+    // 卸载时不 abort——回答中途切到别的菜单，流继续在后台跑完
   }, []);
 
   React.useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [msgs]);
+  }, [s.v]);
 
   const send = (text?: string) => {
-    const message = (text ?? input).trim();
-    if (!message || busy) return;
-    setInput('');
-    setBusy(true);
-    setMsgs(m => [...m, { role: 'user', text: message }, { role: 'ai', text: '', steps: [] }]);
+    const message = (text ?? s.input).trim();
+    if (!message || s.busy) return;
+    patchSession(st => {
+      st.input = '';
+      st.busy = true;
+      st.msgs = [...st.msgs, { role: 'user', text: message }, { role: 'ai', text: '', steps: [] }];
+    });
     // 只更新最后一条 ai 消息
     const patch = (fn: (m: Msg) => Msg) =>
-      setMsgs(m => { const c = [...m]; c[c.length - 1] = fn(c[c.length - 1]); return c; });
-    abortRef.current = agentChat(threadId, message, ev => {
+      patchSession(st => { const c = [...st.msgs]; c[c.length - 1] = fn(c[c.length - 1]); st.msgs = c; });
+    session.abort = agentChat(session.threadId, message, ev => {
       if (ev.type === 'token') patch(m => ({ ...m, text: m.text + ev.text }));
       else if (ev.type === 'tool_start')
         patch(m => ({ ...m, steps: [...(m.steps || []), { name: ev.name, args: ev.args }] }));
       else if (ev.type === 'tool_done')
         patch(m => {
           const steps = [...(m.steps || [])];
-          const i = steps.findIndex(s => s.name === ev.name && !s.done);
+          const i = steps.findIndex(x => x.name === ev.name && !x.done);
           if (i >= 0) steps[i] = { ...steps[i], preview: ev.preview, isError: ev.isError, done: true };
           return { ...m, steps };
         });
       else if (ev.type === 'error') patch(m => ({ ...m, text: m.text + (m.text ? '\n\n' : '') + `⚠ ${ev.message}` }));
-      else if (ev.type === 'done') setBusy(false);
+      else if (ev.type === 'done') patchSession(st => { st.busy = false; st.abort = null; });
     });
   };
 
   const newSession = async () => {
-    abortRef.current?.(); setBusy(false);
-    try { await api.agentReset(threadId); } catch { /* agent 未起时忽略 */ }
-    setThreadId(`th-${Date.now().toString(36)}`);
-    setMsgs([]);
+    session.abort?.();
+    const old = session.threadId;
+    patchSession(st => { st.abort = null; st.busy = false; });
+    try { await api.agentReset(old); } catch { /* agent 未起时忽略 */ }
+    patchSession(st => { st.threadId = `th-${Date.now().toString(36)}`; st.msgs = []; });
   };
 
   const owuiHint = health && !health?.llm?.configured;
@@ -95,13 +112,13 @@ function AgentChat() {
         </div>
       )}
       <div ref={scrollRef} className="chatbox">
-        {msgs.length === 0 && (
+        {s.msgs.length === 0 && (
           <div className="empty-tip" style={{ marginTop: 40 }}>
             试试问：「现在有什么严重告警」「最近 24 小时哪些设备配置变过」「资产台账里有多少台数据库」<br />
             助手只会基于平台工具实时查询的结果作答，不编造数据。
           </div>
         )}
-        {msgs.map((m, i) => (
+        {s.msgs.map((m, i) => (
           <div key={i} className={`chatmsg ${m.role}`}>
             {m.steps && m.steps.length > 0 && (
               <div className="chattools">
@@ -116,18 +133,18 @@ function AgentChat() {
             {m.text && (m.role === 'ai'
               ? <div className="chatmd" dangerouslySetInnerHTML={{ __html: renderMd(m.text) }} />
               : <div className="chatuser">{m.text}</div>)}
-            {m.role === 'ai' && busy && i === msgs.length - 1 && <span className="chattyping" aria-label="正在回答" />}
+            {m.role === 'ai' && s.busy && i === s.msgs.length - 1 && <span className="chattyping" aria-label="正在回答" />}
           </div>
         ))}
       </div>
       <div className="chatinput">
         <textarea
           className="ainp" rows={2} placeholder="向运维助手提问，Enter 发送，Shift+Enter 换行"
-          value={input} onChange={e => setInput(e.target.value)}
+          value={s.input} onChange={e => patchSession(st => { st.input = e.target.value; })}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
         />
-        {busy
-          ? <button className="btn" onClick={() => { abortRef.current?.(); setBusy(false); }}>停止</button>
+        {s.busy
+          ? <button className="btn" onClick={() => { session.abort?.(); patchSession(st => { st.abort = null; st.busy = false; }); }}>停止</button>
           : <button className="btn primary" onClick={() => send()}>发送</button>}
         <button className="btn" onClick={newSession}>新会话</button>
       </div>

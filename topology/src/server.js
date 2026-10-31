@@ -393,6 +393,7 @@ app.get('/api/topology/pathtrace/status', async (req, res) => {
 });
 app.post('/api/topology/pathtrace/refresh', async (req, res) => {
   try {
+  if (!zbx.ok()) return res.status(400).json({ error: 'Zabbix 凭据缺失：检查挂载文件 /app/config/source.json（宿主机 ./server/data/source.json）是否含 endpoint 与 token' });
   if (rtRunning) return res.status(409).json({ error: 'route snapshot refresh running' });
   rtRunning = true;
   const nodeIds = req.body?.node_ids || null;
