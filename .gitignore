@@ -22,5 +22,9 @@ server/data/ops.json
 server/data/backups/
 # AI 工具层调用审计（运行时数据，含查询参数摘要）
 server/data/ai_audit.jsonl
+# 资产台账（含加密凭据）/ 凭据加密密钥 / 资产审计——严禁入库
+server/data/assets.json
+server/data/cred.key
+server/data/asset_audit.jsonl
 # playwright 调试产物
 .playwright-cli/

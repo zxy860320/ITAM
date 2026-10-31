@@ -212,5 +212,7 @@ table.data td.empty-tip { text-align: center; color: var(--text-3); padding: 28p
   border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; font-family: var(--ff-mono);
 }
 .btn { background: var(--bg-inset); color: var(--text-1); border: 1px solid var(--hairline); border-radius: var(--radius-sm); padding: 8px 14px; cursor: pointer; font-size: 12.5px; }
+/* 资产管理弹窗内输入（与 .field input 同口径） */
+.ainp { background: var(--bg-inset); border: 1px solid var(--hairline); color: var(--text-1); border-radius: var(--radius-sm); padding: 7px 9px; font-size: 12.5px; font-family: var(--ff-body); min-width: 0; }
 .btn.primary { background: #1E3A8A; border-color: #1E40AF; }
 .btn:disabled { opacity: .5; cursor: default; }

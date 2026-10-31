@@ -93,7 +93,20 @@ const TOOL_DEFS = [
   },
 ];
 
-export function mountMcp(app, { collector, dbmp, ops }) {
+// 资产台账工具（assets store 存在时启用）：只读台账元数据，永不返回账号密码
+const ASSET_TOOL_DEF = {
+  name: 'query_assets',
+  description: '查询资产台账（CMDB）：类别含服务器/网络设备/虚拟机/数据库/电脑终端/办公软件/Web服务。type 按类别过滤；q 按名称/IP/负责人模糊搜索。返回名称、IP、型号、位置、负责人、环境、状态、凭据数量——不含任何账号密码。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', enum: ['server', 'network', 'vm', 'database', 'pc', 'office', 'web', 'other'] },
+      q: { type: 'string', description: '名称/IP/负责人 关键词' },
+    },
+  },
+};
+
+export function mountMcp(app, { collector, dbmp, ops, assets }) {
   const TOKEN = process.env.ITYW_MCP_TOKEN || '';
 
   function merged() {
@@ -192,6 +205,11 @@ export function mountMcp(app, { collector, dbmp, ops }) {
         lines: d.lines.slice(0, 400).map(x => ({ t: x.t, na: x.na, nb: x.nb, l: redact(x.l) })),
       };
     },
+    query_assets(a) {
+      if (!assets) throw new Error('资产台账未启用');
+      const rows = assets.mcpList({ type: a.type, q: a.q });
+      return { total: rows.length, assets: rows, note: '台账含凭据时 credCount>0；账号密码不通过本工具提供（安全红线）' };
+    },
     async backup_device_now(a) {
       const r = await ops.backup(String(a.asset || '')); // ops.backup 内部含 未配置400/参数400/并发409 校验
       return {
@@ -220,7 +238,7 @@ export function mountMcp(app, { collector, dbmp, ops }) {
         } });
       }
       if (method === 'ping') return wrap({ result: {} });
-      if (method === 'tools/list') return wrap({ result: { tools: TOOL_DEFS } });
+      if (method === 'tools/list') return wrap({ result: { tools: assets ? [...TOOL_DEFS, ASSET_TOOL_DEF] : TOOL_DEFS } });
       if (method === 'tools/call') {
         const name = params?.name;
         const impl = TOOL_IMPL[name];

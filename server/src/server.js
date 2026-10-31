@@ -9,6 +9,8 @@ import { GROUP_MAPPING } from './collector/mockData.js';
 import { Notifier } from './alerter/alerter.js';
 import { mountOps } from './ops/opsRoutes.js';
 import { mountMcp } from './ai/mcpServer.js';
+import { AssetStore } from './assets/assetStore.js';
+import { mountAssets } from './assets/assetRoutes.js';
 
 const PORT = process.env.PORT || 8787;
 // 数据源开关：mock | zabbix（真实 Zabbix JSON-RPC 2.0）
@@ -331,8 +333,13 @@ app.post('/api/source/save', (req, res) => {
 // ---------- 设备操作（经跳板机 JumpServer MCP：配置备份/只读巡检） ----------
 const opsHandle = mountOps(app, { notifier });
 
+// ---------- 资产管理（台账 + 加密凭据；数据 data/assets.json，密钥 data/cred.key 或 ITYW_CRED_KEY） ----------
+const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
+const assetStore = new AssetStore(DATA_DIR);
+mountAssets(app, { store: assetStore, mergedData });
+
 // ---------- AI 工具层（MCP Streamable HTTP，供 Open WebUI 等客户端调用） ----------
-mountMcp(app, { collector, dbmp, ops: opsHandle });
+mountMcp(app, { collector, dbmp, ops: opsHandle, assets: assetStore });
 
 // AI 助手前端配置：内嵌 Open WebUI 的地址（前端 iframe 用）。
 // AI_ASSISTANT_URL 未设时前端按 http://<当前主机>:<AI_ASSISTANT_PORT 默认3001> 拼装

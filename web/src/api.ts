@@ -57,6 +57,16 @@ export const api = {
   opsSessions: (qs: Record<string, any> = {}) =>
     get('/ops/sessions?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
   aiConfig: () => get('/ai/config'),
+  // 资产管理（台账+加密凭据；接口永不返回密码，reveal 显式获取并服务端审计）
+  assetsStats: () => get('/assets/stats'),
+  assets: (qs: Record<string, any>) =>
+    get('/assets?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
+  asset: (id: string) => get(`/assets/${id}`),
+  assetSave: (body: any) => post('/assets/save', body),
+  assetDelete: (id: string) => post('/assets/delete', { id }),
+  assetCredDelete: (assetId: string, credId: string) => post('/assets/cred/delete', { assetId, credId }),
+  assetCredReveal: (assetId: string, credId: string) => post('/assets/cred/reveal', { assetId, credId }),
+  assetsImportMonitor: () => post('/assets/import-monitor'),
 };
 
 /* ---------- topology-svc（:8790，经 vite 代理 /topo-api → /api） ---------- */
