@@ -37,6 +37,9 @@ services:
       ITYW_MCP_TOKEN: ${ITYW_MCP_TOKEN:-}
       AI_ASSISTANT_PORT: ${AI_PORT:-3001}
       AI_ASSISTANT_URL: ${AI_ASSISTANT_URL:-}
+      # 前端 /api/agent/* 由 server 代理到这里——容器网络里必须用服务名，
+      # 默认 127.0.0.1:8791 只适用于与 agent 同机裸跑（本地开发）的场景
+      AGENT_URL: ${AGENT_URL:-http://agent:8791}
     volumes:
       # source.json / notify.json / notify_state.json / dbmp_samples.json / ai_audit.jsonl 持久化
       - ./server/data:/app/server/data

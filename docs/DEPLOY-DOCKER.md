@@ -43,8 +43,8 @@ chmod 600 .env server/data/source.json
 ## 2. 构建与启动
 
 ```bash
-docker compose build            # server / topology / web 三个镜像
-docker compose up -d            # mysql 健康后依次拉起 server、topology、web
+docker compose build            # server / topology / web / agent / open-webui 镜像
+docker compose up -d            # mysql 健康后依次拉起 server、topology、web、agent
 docker compose ps               # 全部 Up；mysql (healthy)
 ```
 
@@ -54,6 +54,27 @@ docker compose ps               # 全部 Up；mysql (healthy)
 - `docker compose exec topology node -e "fetch('http://127.0.0.1:8790/health').then(r=>r.json()).then(j=>console.log(j.db_kind, j.db, j.zbx_connected))"`
   —— 应输出 `mysql mysql://mysql:3306/ityw_topology true`
   （注意：topology 的 `/health` 挂在根路径；前端经 nginx 的调用全是 `/topo-api/topology/*` → `/api/topology/*`）
+- `curl http://127.0.0.1/api/agent/health`（AI 助手 agent）——应输出
+  `{"ok":true,"mcp":{...,"connected":true,"tools":9},"llm":{"configured":true,...}}`。
+  `ok:false` 时看两段：`mcp.connected` false → server 容器到 `server:8787/mcp` 问题（同容器网络，正常不会）；
+  `llm.configured` false → `.env` 里 `LLM_BASE_URL/LLM_API_KEY/LLM_MODEL` 没填。
+  503 → agent 容器没起来：`docker compose logs agent`。
+  **注意**：server 容器经 `AGENT_URL`（compose 默认 `http://agent:8791`）访问 agent——
+  与 agent 同机裸跑开发时才用默认 `127.0.0.1:8791`；容器里改成 127.0.0.1 必现 503。
+
+### AI 助手（agent）配置
+
+`.env` 补三行（模型端点口径见 `.env.example` 注释；LiteLLM/Ollama/vLLM 均可）：
+
+```bash
+LLM_BASE_URL=http://<litellm-host>:4000/v1   # 末尾不带 /model
+LLM_API_KEY=*** ASCII 64hex；粘贴时别带入 U+2026 省略号）
+LLM_MODEL=general
+docker compose up -d agent && docker compose restart server   # 改 .env 后重建 agent、重启 server 注入
+```
+
+agent 会话记忆存 `./agent/data/checkpoints.db`（卷挂载，重建容器不丢）。
+容器内天然无宿主 `HTTP_PROXY` 污染；宿主机直接裸跑 agent 时需剥离代理 env（见 .env.example）。
 
 ## 3. 数据迁移（可选，把本机 sqlite 里的拓扑现状带上服务器）
 
@@ -93,3 +114,5 @@ docker compose exec mysql mysqldump -uroot -p ityw_topology | gzip > topo-$(date
 | topology | node:22-alpine | express+mysql2；`TOPO_DB=mysql`；scripts/ 打入镜像供 migrate 复用 |
 | web | node:22-alpine → nginx:1.27-alpine | `vite build` 产物拷入 nginx；nginx.conf 复刻 vite 代理规则 |
 | mysql | mysql:8.0 | utf8mb4；命名卷 `mysql_data`；healthcheck 供 topology depends_on |
+| agent | python:3.12-slim | LangGraph 助手（FastAPI :8791）；工具经 `server:8787/mcp`；记忆卷 `./agent/data` |
+| open-webui | ghcr.io/open-webui/open-webui:v0.12.5 | 备用助手标签（iframe 经 nginx 3001）；可选，不想起可 `docker compose up -d --scale open-webui=0` |
