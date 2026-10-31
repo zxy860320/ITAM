@@ -56,6 +56,7 @@ export const api = {
     get('/ops/changes?' + new URLSearchParams(Object.entries(qs).map(([k, v]) => [k, String(v)]))),
   opsSessions: (qs: Record<string, any> = {}) =>
     get('/ops/sessions?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
+  aiConfig: () => get('/ai/config'),
 };
 
 /* ---------- topology-svc（:8790，经 vite 代理 /topo-api → /api） ---------- */

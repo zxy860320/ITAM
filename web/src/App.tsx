@@ -14,6 +14,7 @@ import FlowPathPage from './pages/FlowPathPage';
 import SourcePage from './pages/SourcePage';
 import NotifyPage from './pages/NotifyPage';
 import OpsPage from './pages/OpsPage';
+import AssistantPage from './pages/AssistantPage';
 import SystemPage from './pages/SystemPage';
 
 const NAV = [
@@ -32,6 +33,7 @@ const NAV = [
     { key: 'source', label: '监控源对接', hash: '#/source' },
     { key: 'notify', label: '告警出口', hash: '#/notify' },
     { key: 'ops', label: '设备操作', hash: '#/ops', color: 'var(--dom-service)' },
+    { key: 'assistant', label: 'AI 助手', hash: '#/assistant', color: 'var(--dom-wlan)' },
     { key: 'system', label: '系统管理', hash: '#/system' },
   ]},
 ];
@@ -50,6 +52,7 @@ const PAGES: Record<string, [React.FC<any>, string]> = {
   source: [SourcePage, '监控源对接'],
   notify: [NotifyPage, '告警出口'],
   ops: [OpsPage, '设备操作'],
+  assistant: [AssistantPage, 'AI 助手'],
   system: [SystemPage, '系统管理'],
 };
 

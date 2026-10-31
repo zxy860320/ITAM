@@ -20,5 +20,7 @@ server/data/dbmp_samples.json
 # 跳板机 MCP token 与设备配置备份全文（含设备密文），严禁入库
 server/data/ops.json
 server/data/backups/
+# AI 工具层调用审计（运行时数据，含查询参数摘要）
+server/data/ai_audit.jsonl
 # playwright 调试产物
 .playwright-cli/

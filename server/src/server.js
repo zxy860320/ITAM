@@ -8,6 +8,7 @@ import { summary, topProblems, eventTrend, listFilter, paginate, byDomain, DOMAI
 import { GROUP_MAPPING } from './collector/mockData.js';
 import { Notifier } from './alerter/alerter.js';
 import { mountOps } from './ops/opsRoutes.js';
+import { mountMcp } from './ai/mcpServer.js';
 
 const PORT = process.env.PORT || 8787;
 // 数据源开关：mock | zabbix（真实 Zabbix JSON-RPC 2.0）
@@ -328,7 +329,21 @@ app.post('/api/source/save', (req, res) => {
 });
 
 // ---------- 设备操作（经跳板机 JumpServer MCP：配置备份/只读巡检） ----------
-mountOps(app, { notifier });
+const opsHandle = mountOps(app, { notifier });
+
+// ---------- AI 工具层（MCP Streamable HTTP，供 Open WebUI 等客户端调用） ----------
+mountMcp(app, { collector, dbmp, ops: opsHandle });
+
+// AI 助手前端配置：内嵌 Open WebUI 的地址（前端 iframe 用）。
+// AI_ASSISTANT_URL 未设时前端按 http://<当前主机>:<AI_ASSISTANT_PORT 默认3001> 拼装
+app.get('/api/ai/config', (req, res) => {
+  res.json({
+    enabled: (process.env.AI_ENABLED || '1') !== '0',
+    url: process.env.AI_ASSISTANT_URL || '',
+    port: Number(process.env.AI_ASSISTANT_PORT || 3001),
+    mcpEndpoint: '/mcp',
+  });
+});
 
 // ---------- 系统管理 ----------
 app.get('/api/system', (req, res) => {

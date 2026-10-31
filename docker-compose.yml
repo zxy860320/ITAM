@@ -33,8 +33,12 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8787"
+      # /mcp 可选 Bearer 鉴权（内网默认免鉴权）；前端内嵌页拼装 iframe 地址用 AI_PORT
+      ITYW_MCP_TOKEN: ${ITYW_MCP_TOKEN:-}
+      AI_ASSISTANT_PORT: ${AI_PORT:-3001}
+      AI_ASSISTANT_URL: ${AI_ASSISTANT_URL:-}
     volumes:
-      # source.json / notify.json / notify_state.json / dbmp_samples.json 持久化
+      # source.json / notify.json / notify_state.json / dbmp_samples.json / ai_audit.jsonl 持久化
       - ./server/data:/app/server/data
     # 仅 web(nginx) 经内部网络访问；调试需要时取消注释：
     # ports:
@@ -64,6 +68,31 @@ services:
     # ports:
     #   - "127.0.0.1:8790:8790"
 
+  # AI 助手前端（Open WebUI）：平台内嵌页 iframe 指向它；MCP 工具层 = server:8787/mcp
+  # 首次部署后管理员配置一次：
+  #   1) Settings > Admin > Integrations > External Tool Servers > Add Connection
+  #      Type=MCP (Streamable HTTP), URL=http://server:8787/mcp, Auth=None
+  #   2) Settings > Admin > Connections 配 OpenAI 兼容模型端点（内网 vLLM/Ollama 均可）
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.12.5
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      WEBUI_NAME: ${AI_WEBUI_NAME:-ITYW AI 运维助手}
+      # 加密会话/OAuth token 的密钥——固定后重建容器不掉登录态
+      WEBUI_SECRET_KEY: ${AI_SECRET_KEY:?AI_SECRET_KEY 未设置（.env 加一行随机串）}
+      ENABLE_SIGNUP: ${AI_ENABLE_SIGNUP:-false}
+      ENABLE_OLLAMA_API: ${AI_OLLAMA:-false}
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      WEBUI_URL: ${AI_PUBLIC_URL:-}
+      DATA_DIR: /app/backend/data
+    volumes:
+      - open_webui_data:/app/backend/data
+    # 仅 nginx(3001 server 块) 经内部网络访问，不直接映射宿主机端口：
+    # ports:
+    #   - "127.0.0.1:3002:8080"
+
   web:
     build:
       context: .
@@ -74,6 +103,8 @@ services:
       - topology
     ports:
       - "${WEB_PORT:-80}:80"
+      # AI 助手（nginx → open-webui，剥离 X-Frame-Options 供平台 iframe 内嵌）
+      - "${AI_PORT:-3001}:3001"
 
   # 一次性数据迁移（sqlite → MySQL）：
   #   先 docker compose build topology，再
@@ -98,3 +129,4 @@ services:
 
 volumes:
   mysql_data:
+  open_webui_data:

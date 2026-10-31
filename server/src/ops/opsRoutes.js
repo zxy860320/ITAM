@@ -204,4 +204,36 @@ export function mountOps(app, { notifier }) {
       res.json(r);
     } catch (e) { res.status(502).json({ error: String(e.message || e) }); }
   });
+
+  // 内部句柄：供 /mcp 工具层直接复用（同一进程内调用，不绕 HTTP；安全口径与路由一致）
+  return {
+    jmsConfigured: () => jms.configured,
+    list: ({ assetKey, limit }) => store.list({ assetKey, limit }),
+    meta: () => {
+      const byAsset = {};
+      for (const x of store.index.items) {
+        if (!byAsset[x.assetKey]) byAsset[x.assetKey] = { at: x.at, id: x.id, sha1: x.sha1, bytes: x.bytes, changed: x.changed };
+      }
+      return { byAsset };
+    },
+    diff: (aId, bId) => {
+      const ra = store.get(aId), rb = store.get(bId);
+      if (!ra || !rb) return { ok: false, error: '备份记录不存在' };
+      try {
+        const d = diffLines(fs.readFileSync(ra.file, 'utf-8'), fs.readFileSync(rb.file, 'utf-8'));
+        return { ok: true, a: ra, b: rb, same: ra.sha1 === rb.sha1, added: d.added, removed: d.removed, truncated: d.truncated, lines: d.lines };
+      } catch (e) { return { ok: false, error: String(e.message || e) }; }
+    },
+    async backup(asset) {
+      if (!jms.configured) throw new Error('跳板机 MCP 未配置');
+      if (!asset) throw new Error('缺少目标设备（IP 或名称）');
+      if (inFlight.has(String(asset))) throw new Error('该设备备份正在进行中');
+      inFlight.add(String(asset));
+      try {
+        return await runTpl({ asset, tpl: 'cfg-huawei' });
+      } finally {
+        inFlight.delete(String(asset));
+      }
+    },
+  };
 }
