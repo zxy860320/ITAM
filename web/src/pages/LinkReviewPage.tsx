@@ -5,6 +5,8 @@
 import React from 'react';
 import { topoApi, usePoll } from '../api';
 import { ago, Pager } from '../components/common';
+import { useTopoAuth } from '../topology/useTopoAuth';
+import { TopoAuthBar } from '../components/TopoAuthBar';
 
 const CONF_BANDS = [
   { v: '', label: '全部置信度' },
@@ -35,8 +37,9 @@ function confColor(c: number) {
 }
 
 export default function LinkReviewPage(_: any) {
-  const [operator, setOperator] = React.useState(() => localStorage.getItem('topo.operator') || '');
-  React.useEffect(() => { localStorage.setItem('topo.operator', operator); }, [operator]);
+  // V2 §10：operator 自报退役——操作者=登录会话（后端 confirmed_by 直接取会话用户）
+  const auth = useTopoAuth();
+  const canWrite = auth.authed && auth.role === 'admin';
 
   const [status, setStatus] = React.useState('half,conflict');
   const [band, setBand] = React.useState('');
@@ -62,8 +65,8 @@ export default function LinkReviewPage(_: any) {
   const rows: any[] = data?.data || [];
   const meta = data?.meta || { page: 1, size, total: 0, by_status: [], by_conf: [], by_node: [] };
   const flash = (s: string) => { setMsg(s); setTimeout(() => setMsg(''), 5000); };
-  const needOperator = () => {
-    if (!operator.trim()) { flash('请先填写操作人（必填，操作会记入 confirmed_by）'); return false; }
+  const needWrite = () => {
+    if (!canWrite) { flash('写操作需要拓扑管理员登录（右上角登录）'); return false; }
     return true;
   };
 
@@ -80,11 +83,11 @@ export default function LinkReviewPage(_: any) {
   });
 
   const actOne = async (l: any, kind: 'confirm' | 'reject') => {
-    if (!needOperator()) return;
+    if (!needWrite()) return;
     setBusy(String(l.link_id));
     try {
-      if (kind === 'confirm') await topoApi.confirmLink(l.link_id, operator.trim());
-      else await topoApi.rejectLink(l.link_id, operator.trim(), '审核页忽略');
+      if (kind === 'confirm') await topoApi.confirmLink(l.link_id);
+      else await topoApi.rejectLink(l.link_id, '审核页忽略');
       setSelected(prev => { const s = new Set(prev as Set<number>); s.delete(l.link_id); return s; });
       reload();
     } catch (e: any) { flash('操作失败：' + (e.message || e)); }
@@ -92,11 +95,11 @@ export default function LinkReviewPage(_: any) {
   };
 
   const bulkIds = async (kind: 'confirm' | 'reject') => {
-    if (!needOperator() || !selected.size) return;
+    if (!needWrite() || !selected.size) return;
     if (!window.confirm(`确认${kind === 'confirm' ? '确认' : '忽略'}选中的 ${selected.size} 条链路？`)) return;
     setBusy('bulk');
     try {
-      const body: any = { link_ids: [...(selected as Set<number>)], operator: operator.trim() };
+      const body: any = { link_ids: [...(selected as Set<number>)] };
       const r = kind === 'confirm' ? await topoApi.bulkConfirm(body) : await topoApi.bulkReject(body);
       flash(`已${kind === 'confirm' ? '确认' : '忽略'} ${r.affected} 条（请求 ${r.requested}）`);
       setSelected(new Set()); reload();
@@ -106,7 +109,7 @@ export default function LinkReviewPage(_: any) {
 
   // 按当前过滤条件（设备+置信带，不含搜索词与分页）圈定全部匹配链批量操作
   const bulkMatch = (kind: 'confirm' | 'reject') => {
-    if (!needOperator()) return;
+    if (!needWrite()) return;
     const match: any = {};
     if (nodeId) match.node_id = +nodeId;
     if (band.startsWith('min:')) match.min_confidence = Number(band.slice(4));
@@ -116,7 +119,7 @@ export default function LinkReviewPage(_: any) {
     setBusy('bulk');
     (async () => {
       try {
-        const body: any = { match, operator: operator.trim() };
+        const body: any = { match };
         if (kind === 'confirm') body.note = `审核页按条件批量确认（${band || '全部置信'}${nodeId ? ' / 指定设备' : ''}）`;
         else body.reason = '审核页按条件批量忽略';
         const r = kind === 'confirm' ? await topoApi.bulkConfirm(body) : await topoApi.bulkReject(body);
@@ -172,7 +175,7 @@ export default function LinkReviewPage(_: any) {
           <input placeholder="搜索对端设备名 / 快照证据(sys_name、chassis_id…) / 接口" value={q}
             onChange={e => changeFilter(() => setQ(e.target.value))} style={{ width: 340 }} />
           <span className="spacer" style={{ flex: 1 }} />
-          <input placeholder="操作人（必填，记忆）" value={operator} onChange={e => setOperator(e.target.value)} style={{ width: 200 }} />
+          <TopoAuthBar />
           <button className="btn" onClick={reload}>刷新</button>
         </div>
         {msg && <div style={{ marginTop: 8, fontSize: 12, color: 'var(--dom-network)' }}>{msg}</div>}
@@ -182,12 +185,12 @@ export default function LinkReviewPage(_: any) {
       {/* 批量操作条 */}
       <div className="card" style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: 'var(--text-3)' }}>已选 <b style={{ color: 'var(--text-1)' }}>{selected.size}</b> 条（本页 {rows.length} 条）</span>
-        <button className="btn" disabled={!selected.size || busy === 'bulk'} onClick={() => bulkIds('confirm')}>批量确认所选</button>
-        <button className="btn" disabled={!selected.size || busy === 'bulk'} onClick={() => bulkIds('reject')}>批量忽略所选</button>
+        <button className="btn" disabled={!canWrite || !selected.size || busy === 'bulk'} onClick={() => bulkIds('confirm')}>批量确认所选</button>
+        <button className="btn" disabled={!canWrite || !selected.size || busy === 'bulk'} onClick={() => bulkIds('reject')}>批量忽略所选</button>
         <span style={{ width: 1, height: 20, background: 'var(--hairline)' }} />
         <span style={{ fontSize: 12, color: 'var(--text-3)' }}>按过滤条件（{meta.total} 条，含未翻页）：</span>
-        <button className="btn" disabled={!meta.total || busy === 'bulk'} onClick={() => bulkMatch('confirm')}>全部确认</button>
-        <button className="btn" disabled={!meta.total || busy === 'bulk'} onClick={() => bulkMatch('reject')}>全部忽略</button>
+        <button className="btn" disabled={!canWrite || !meta.total || busy === 'bulk'} onClick={() => bulkMatch('confirm')}>全部确认</button>
+        <button className="btn" disabled={!canWrite || !meta.total || busy === 'bulk'} onClick={() => bulkMatch('reject')}>全部忽略</button>
         <span className="spacer" style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: 'var(--text-3)' }}>建议：先按「= 1.0」置信带逐设备批量确认；&lt;0.5 的逐条核对证据后再操作</span>
       </div>
@@ -244,8 +247,8 @@ export default function LinkReviewPage(_: any) {
                 <td>{l.status}{l.missing_rounds ? <span style={{ color: 'var(--text-3)', fontSize: 11 }}> ×{l.missing_rounds}</span> : null}</td>
                 <td style={{ fontSize: 11 }}>{l.last_seen ? ago(l.last_seen) : '—'}</td>
                 <td>
-                  <button className="btn" style={{ padding: '3px 8px', fontSize: 11 }} disabled={busy !== ''} onClick={() => actOne(l, 'confirm')}>确认</button>{' '}
-                  <button className="btn" style={{ padding: '3px 8px', fontSize: 11 }} disabled={busy !== ''} onClick={() => actOne(l, 'reject')}>忽略</button>
+                  <button className="btn" style={{ padding: '3px 8px', fontSize: 11 }} disabled={!canWrite || busy !== ''} onClick={() => actOne(l, 'confirm')}>确认</button>{' '}
+                  <button className="btn" style={{ padding: '3px 8px', fontSize: 11 }} disabled={!canWrite || busy !== ''} onClick={() => actOne(l, 'reject')}>忽略</button>
                 </td>
               </tr>
             ))}
@@ -265,7 +268,7 @@ export default function LinkReviewPage(_: any) {
         <span className="mono"> 1.0</span>=两端接口均已在本系统解析（只缺一端 LLDP 回报，通常真实直连，适合按设备批量确认）；
         <span className="mono"> 0.7/0.4</span>=按 chassis ID / 系统名部分匹配；
         <span className="mono"> 0.3</span>=对端身份无法解析（未纳管设备/终端），请核对右侧原始证据（sys_name / port_desc / chassis_id）后再决定。
-        所有确认与忽略均记录操作人，可追溯。
+        所有确认与忽略由服务端按登录会话记录操作人（confirmed_by），可追溯；审核需拓扑管理员登录。
       </div>
     </div>
   );

@@ -6,14 +6,17 @@ import { ago } from '../components/common';
 import { Chart, darkBase } from '../components/Chart';
 import { TopoCanvas, TopoLink, TopoSel } from '../components/TopoCanvas';
 import { PanelBody } from '../components/TopologyPanelBody';
+import { useTopoAuth } from '../topology/useTopoAuth';
+import { TopoAuthBar } from '../components/TopoAuthBar';
 import '../components/topo-canvas.css';
 
 export default function TopologyPage(_: any) {
   const [includeStale, setIncludeStale] = React.useState(false);
   const [busy, setBusy] = React.useState('');
   const [msg, setMsg] = React.useState('');
-  const [operator, setOperator] = React.useState(() => localStorage.getItem('topo.operator') || '');
-  React.useEffect(() => { localStorage.setItem('topo.operator', operator); }, [operator]);
+  // V2 §10：operator 自报退役——操作者=登录会话
+  const auth = useTopoAuth();
+  const canWrite = auth.authed && auth.role === 'admin';
 
   const { data: graph, reload: reloadGraph, err: graphErr } =
     usePoll(() => topoApi.graph(includeStale ? 'stale,conflict' : 'conflict'), 60000, String(includeStale));
@@ -172,12 +175,13 @@ export default function TopologyPage(_: any) {
             <label title="全网总览时叠加未纳管对端快照卡（数量多、图很大；聚焦模式始终显示）" style={{ fontSize: 12, color: 'var(--text-2)', display: 'flex', gap: 4, alignItems: 'center' }}>
               <input type="checkbox" checked={showExt} onChange={e => setShowExt(e.target.checked)} style={{ width: 'auto' }} />总览含未纳管对端
             </label>
-            <button className="btn" disabled={!!busy} onClick={() => run(() => topoApi.sync(), '同步', () => { reloadGraph(); reloadSummary(); })}>
+            <button className="btn" disabled={!canWrite || !!busy} onClick={() => run(() => topoApi.sync(), '同步', () => { reloadGraph(); reloadSummary(); })}>
               {busy === '同步' ? '同步中…' : '同步节点'}
             </button>
-            <button className="btn" disabled={!!busy || summary?.data?.discovery_running} onClick={() => run(() => topoApi.discoveryRun(), 'LLDP 发现', () => setTimeout(() => { reloadSummary(); reloadGraph(); reloadPending(); }, 5000))}>
+            <button className="btn" disabled={!canWrite || !!busy || summary?.data?.discovery_running} onClick={() => run(() => topoApi.discoveryRun(), 'LLDP 发现', () => setTimeout(() => { reloadSummary(); reloadGraph(); reloadPending(); }, 5000))}>
               {summary?.data?.discovery_running ? '发现进行中…' : busy === 'LLDP 发现' ? '已排队' : 'LLDP 发现'}
             </button>
+            <TopoAuthBar compact />
             {msg && <span style={{ fontSize: 12, color: 'var(--sev-info)' }}>{msg}</span>}
           </div>
           <div className="tc-wrap" ref={wrapRef}>
@@ -216,8 +220,9 @@ export default function TopologyPage(_: any) {
           <a className="btn" style={{ padding: '4px 8px', fontSize: 11, textDecoration: 'none' }} href="#/link-review">前往链路审核页（分页/过滤/批量）→</a>
           <button className="btn" style={{ padding: '4px 8px', fontSize: 11 }} onClick={reloadPending}>刷新</button>
         </div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-          <input placeholder="操作人（确认/忽略必填）" value={operator} onChange={e => setOperator(e.target.value)} style={{ width: 320 }} />
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+          <TopoAuthBar compact />
+          {!canWrite && <span style={{ fontSize: 12, color: 'var(--text-3)' }}>确认/忽略需拓扑管理员登录</span>}
         </div>
         {(pending?.data || []).map((l: any) => (
           <div key={l.link_id} className="ev-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
@@ -231,10 +236,10 @@ export default function TopologyPage(_: any) {
               {l.b_snapshot?.sys_name && !l.b.iface && <span> · 邻居原始名 {l.b_snapshot.sys_name}</span>}
             </div>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button className="btn primary" style={{ padding: '3px 10px', fontSize: 11 }} disabled={!operator || !!busy}
-                onClick={() => run(() => topoApi.confirmLink(l.link_id, operator), '确认', () => { reloadPending(); reloadGraph(); reloadSummary(); })}>确认</button>
-              <button className="btn" style={{ padding: '3px 10px', fontSize: 11 }} disabled={!operator || !!busy}
-                onClick={() => run(() => topoApi.rejectLink(l.link_id, operator, '人工判定无效'), '忽略', () => { reloadPending(); reloadGraph(); reloadSummary(); })}>忽略</button>
+              <button className="btn primary" style={{ padding: '3px 10px', fontSize: 11 }} disabled={!canWrite || !!busy}
+                onClick={() => run(() => topoApi.confirmLink(l.link_id), '确认', () => { reloadPending(); reloadGraph(); reloadSummary(); })}>确认</button>
+              <button className="btn" style={{ padding: '3px 10px', fontSize: 11 }} disabled={!canWrite || !!busy}
+                onClick={() => run(() => topoApi.rejectLink(l.link_id, '人工判定无效'), '忽略', () => { reloadPending(); reloadGraph(); reloadSummary(); })}>忽略</button>
               <button className="btn" style={{ padding: '3px 10px', fontSize: 11 }}
                 onClick={() => { setFocus(l.a); setSel({ kind: 'edge', id: l.link_id }); setTab('detail'); }}>图上定位</button>
             </div>

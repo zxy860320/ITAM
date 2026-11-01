@@ -11,14 +11,17 @@ import '../components/topo-g6.css';
 import { GROUP_ORDER, GROUP_LABEL, classifyGroup } from '../topology/classifier';
 import { autoLayout, previewMerge, SavedNodeLayout } from '../topology/autoLayout';
 import { loadLayout, saveNodes, saveGroups, resetLayout } from '../topology/layoutStore';
+import { useTopoAuth } from '../topology/useTopoAuth';
+import { TopoAuthBar } from '../components/TopoAuthBar';
 
 type SelV2 = { kind: 'node' | 'edge'; id: number } | null;
 
 export default function TopologyPageV2(_: any) {
   const [busy, setBusy] = React.useState('');
   const [msg, setMsg] = React.useState('');
-  const [operator, setOperator] = React.useState(() => localStorage.getItem('topo.operator') || 'admin');
-  React.useEffect(() => { localStorage.setItem('topo.operator', operator); }, [operator]);
+  // V2 §10：operator 自报退役——操作者=登录会话，写操作要求 admin（后端 401/403 是真正闸门）
+  const auth = useTopoAuth();
+  const canWrite = auth.authed && auth.role === 'admin';
 
   const { data: graph, reload: reloadGraph, err: graphErr } = usePoll(() => topoApi.graph('conflict'), 90000);
   const { data: summary } = usePoll(() => topoApi.discoverySummary(), 90000);
@@ -116,8 +119,8 @@ export default function TopologyPageV2(_: any) {
     if (!payload.nodes.length && !payload.groups.length) { say('没有待保存的变更'); return; }
     setBusy('保存');
     try {
-      await saveNodes(payload.nodes, operator);
-      await saveGroups(payload.groups as any, operator);
+      await saveNodes(payload.nodes);
+      await saveGroups(payload.groups as any);
       viewRef.current!.markSaved();
       say(`布局已保存（节点 ${payload.nodes.length}、区域 ${payload.groups.length}）`);
     } catch (e: any) { say(`保存失败：${e.message}`); }
@@ -126,7 +129,7 @@ export default function TopologyPageV2(_: any) {
   const doReset = async () => {
     setConfirmReset(false); setBusy('重置');
     try {
-      await resetLayout(operator);
+      await resetLayout();
       initedRef.current = false;
       posRef.current = new Map(); gposRef.current = new Map();
       viewRef.current?.setData([], [], new Map(), new Map());
@@ -189,6 +192,7 @@ export default function TopologyPageV2(_: any) {
               <span style={{ color: 'var(--text-3)', fontSize: 11, marginLeft: 8 }}>G6 · 区域可折叠 · 布局存数据库（跨浏览器共享）</span>
             </span>
             <span className="spacer" style={{ flex: 1 }} />
+            <TopoAuthBar compact />
             <div style={{ position: 'relative' }}>
               <input placeholder="搜索设备（名称/IP）定位" value={searchQ} onChange={e => setSearchQ(e.target.value)} style={{ width: 190, fontSize: 12 }} />
               {searchQ && (
@@ -201,19 +205,19 @@ export default function TopologyPageV2(_: any) {
                 </div>
               )}
             </div>
-            <button className={`btn ${editable ? 'primary' : ''}`} onClick={() => setEditable(v => !v)} title="编辑态：可拖动设备卡片/区域框（拖动即人工布局，永久保留）">
+            <button className={`btn ${editable ? 'primary' : ''}`} disabled={!canWrite} onClick={() => setEditable(v => !v)} title={canWrite ? '编辑态：可拖动设备卡片/区域框（拖动即人工布局，永久保留）' : '写操作需管理员登录'}>
               {editable ? '✎ 编辑中' : '编辑布局'}
             </button>
             <button className="btn" onClick={runAutoLayout} disabled={!nodes.length}>自动布局…</button>
-            <button className="btn" onClick={doSave} disabled={!!busy || (!dirty.nodes && !dirty.groups)}>保存布局{dirty.nodes + dirty.groups ? ` (${dirty.nodes + dirty.groups})` : ''}</button>
-            <button className="btn" onClick={toggleLock} disabled={!sel || sel.kind !== 'node'} title="锁定后自动布局不再移动该设备">
+            <button className="btn" onClick={doSave} disabled={!canWrite || !!busy || (!dirty.nodes && !dirty.groups)} title={canWrite ? undefined : '需管理员登录'}>保存布局{dirty.nodes + dirty.groups ? ` (${dirty.nodes + dirty.groups})` : ''}</button>
+            <button className="btn" onClick={toggleLock} disabled={!canWrite || !sel || sel.kind !== 'node'} title="锁定后自动布局不再移动该设备">
               {sel && sel.kind === 'node' && posRef.current.get(sel.id)?.locked ? '解锁位置' : '锁定位置'}
             </button>
             <button className="btn" onClick={() => collapseAll(true)}>全部折叠</button>
             <button className="btn" onClick={() => collapseAll(false)}>全部展开</button>
             <button className="btn" onClick={() => viewRef.current?.fitAll()}>适应画布</button>
             <button className="btn" onClick={() => viewRef.current?.enterFullscreen()}>全屏</button>
-            <button className="btn" style={{ color: 'var(--sev-critical)' }} onClick={() => setConfirmReset(true)}>重置布局</button>
+            <button className="btn" style={{ color: 'var(--sev-critical)' }} disabled={!canWrite} onClick={() => setConfirmReset(true)} title={canWrite ? undefined : '需管理员登录'}>重置布局</button>
             <a className="btn" href="#/topology-legacy" style={{ textDecoration: 'none' }} title="回滚通道：旧 ELK 版拓扑页">旧版</a>
             {msg && <span style={{ fontSize: 12, color: 'var(--sev-info)' }}>{msg}</span>}
           </div>
@@ -272,10 +276,9 @@ export default function TopologyPageV2(_: any) {
         <div className="tg6-modalmask" onClick={() => setConfirmReset(false)}>
           <div className="tg6-modal" onClick={e => e.stopPropagation()}>
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10, color: 'var(--sev-critical)' }}>⚠ 重置全部布局？</div>
-            <div className="tg6-note">这将<b>清除数据库中全部人工与自动布局位置</b>（唯一允许清除人工布局的入口，操作人 {operator}）。清除后页面将重新自动布局。此操作不可撤销。</div>
+            <div className="tg6-note">这将<b>清除数据库中全部人工与自动布局位置</b>（唯一允许清除人工布局的入口，操作人 {auth.user}）。清除前服务端自动保存布局快照（pre-reset），可从快照表找回。清除后页面将重新自动布局。</div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <input placeholder="确认请输入操作人" value={operator} onChange={e => setOperator(e.target.value)} style={{ width: 200 }} />
-              <button className="btn" style={{ color: 'var(--sev-critical)' }} disabled={!operator || !!busy} onClick={doReset}>确认重置</button>
+              <button className="btn" style={{ color: 'var(--sev-critical)' }} disabled={!!busy} onClick={doReset}>确认重置</button>
               <button className="btn" onClick={() => setConfirmReset(false)}>取消</button>
             </div>
           </div>

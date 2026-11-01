@@ -114,11 +114,12 @@ export function agentChat(
   return () => ac.abort();
 }
 
-/* ---------- topology-svc（:8790，经 vite 代理 /topo-api → /api） ---------- */
+/* ---------- topology-svc（:8790，经 vite 代理 /topo-api → /api；生产经 nginx /topo-api/ 同源代理） ---------- */
 const TBASE = '/topo-api';
+// V2 认证：写端点需要 httpOnly 会话 cookie，所有 topo 请求必须带凭据（同源/白名单 CORS 均已配好）
 // 注意：不能用上面的 get()——它会再加 '/api' 前缀变成 /api/topo-api/...（404）
 async function tget<T = any>(path: string): Promise<T> {
-  const r = await fetch(TBASE + path);
+  const r = await fetch(TBASE + path, { credentials: 'include' });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
     throw new Error(j?.error || `${path} -> ${r.status}`);
@@ -128,6 +129,7 @@ async function tget<T = any>(path: string): Promise<T> {
 async function tpost<T = any>(path: string, body?: any): Promise<T> {
   const r = await fetch(TBASE + path, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -138,6 +140,7 @@ async function tpost<T = any>(path: string, body?: any): Promise<T> {
 async function tput<T = any>(path: string, body?: any): Promise<T> {
   const r = await fetch(TBASE + path, {
     method: 'PUT',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -145,6 +148,11 @@ async function tput<T = any>(path: string, body?: any): Promise<T> {
   if (!r.ok) throw new Error(j?.error || `${path} -> ${r.status}`);
   return j;
 }
+export const topoAuth = {
+  me: () => tget('/topology/auth/me'),
+  login: (username: string, password: string) => tpost('/topology/auth/login', { username, password }),
+  logout: () => tpost('/topology/auth/logout'),
+};
 export const topoApi = {
   graph: (include = '') => tget(`/topology/graph${include ? '?include=' + include : ''}`),
   nodes: (qs: Record<string, any>) =>
@@ -154,10 +162,10 @@ export const topoApi = {
     tget('/topology/links?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
   pending: (qs: Record<string, any> = {}) =>
     tget('/topology/links/pending?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
-  confirmLink: (id: number, operator: string) => tpost(`/topology/links/${id}/confirm`, { operator }),
-  rejectLink: (id: number, operator: string, reason?: string) => tpost(`/topology/links/${id}/reject`, { operator, reason }),
-  bulkConfirm: (body: { link_ids?: number[]; match?: any; operator: string; note?: string }) => tpost('/topology/links/bulk-confirm', body),
-  bulkReject: (body: { link_ids?: number[]; match?: any; operator: string; reason?: string }) => tpost('/topology/links/bulk-reject', body),
+  confirmLink: (id: number) => tpost(`/topology/links/${id}/confirm`, {}),
+  rejectLink: (id: number, reason?: string) => tpost(`/topology/links/${id}/reject`, { reason }),
+  bulkConfirm: (body: { link_ids?: number[]; match?: any; note?: string }) => tpost('/topology/links/bulk-confirm', body),
+  bulkReject: (body: { link_ids?: number[]; match?: any; reason?: string }) => tpost('/topology/links/bulk-reject', body),
   traffic: (id: number, range: string) => tget(`/topology/links/${id}/traffic?range=${range}`),
   ifaceTraffic: (id: number, range: string) => tget(`/topology/interfaces/${id}/traffic?range=${range}`),
   sync: () => tpost('/topology/sync'),
@@ -168,9 +176,9 @@ export const topoApi = {
   rtRefresh: (node_ids?: string[]) => tpost('/topology/pathtrace/refresh', node_ids ? { node_ids } : {}),
   // P3 全局共享布局（DB 唯一存储；auto/manual + position_locked）
   layoutGet: () => tget('/topology/layout'),
-  layoutSave: (nodes: any[], operator: string) => tput('/topology/layout', { nodes, operator }),
-  layoutGroups: (groups: any[], operator: string) => tput('/topology/layout/groups', { groups, operator }),
-  layoutReset: (operator: string) => tpost('/topology/layout/reset', { operator }),
+  layoutSave: (nodes: any[]) => tput('/topology/layout', { nodes }),
+  layoutGroups: (groups: any[]) => tput('/topology/layout/groups', { groups }),
+  layoutReset: () => tpost('/topology/layout/reset', {}),
 };
 
 /** 通用轮询 hook；key 变化（筛选/翻页/搜索）立即重新拉取，不必等轮询周期 */

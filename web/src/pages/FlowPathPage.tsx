@@ -5,6 +5,8 @@
 import React from 'react';
 import { topoApi, usePoll } from '../api';
 import { Chart, darkBase, axisStyle } from '../components/Chart';
+import { useTopoAuth } from '../topology/useTopoAuth';
+import { TopoAuthBar } from '../components/TopoAuthBar';
 
 const RANGES = ['6h', '24h', '7d', '30d'];
 const fmtBps = (v: number) => {
@@ -51,6 +53,9 @@ function TrafficChart({ series, title, range }: { series: { name: string; data: 
 interface HopTraffic { kind: 'link' | 'iface'; data?: any; error?: string; loading: boolean }
 
 export default function FlowPathPage(_: any) {
+  // V2 §10：刷新路由快照是写端点（需管理员会话）；查询本身只读匿名可用
+  const auth = useTopoAuth();
+  const canWrite = auth.authed && auth.role === 'admin';
   const [src, setSrc] = React.useState(() => localStorage.getItem('uocp.flow.src') || '');
   const [dst, setDst] = React.useState(() => localStorage.getItem('uocp.flow.dst') || '');
   const [range, setRange] = React.useState(() => localStorage.getItem('uocp.flow.range') || '24h');
@@ -137,7 +142,8 @@ export default function FlowPathPage(_: any) {
           <span>路由快照：{okSnaps.length} 台正常{snaps.length ? ` / 共 ${snaps.length} 台` : ''}
             {rt?.meta?.last_refresh ? ` · 最近刷新 ${new Date(rt.meta.last_refresh.at * 1000).toLocaleString('zh-CN')}` : ' · 尚未刷新'}
           </span>
-          <button className="btn" onClick={doRefresh} disabled={refreshing}>{refreshing ? '快照刷新中…' : '刷新路由快照'}</button>
+          <button className="btn" onClick={doRefresh} disabled={refreshing || !canWrite} title={canWrite ? undefined : '刷新路由快照需要拓扑管理员登录'}>{refreshing ? '快照刷新中…' : '刷新路由快照'}</button>
+          <TopoAuthBar compact />
           {msg && <span style={{ color: 'var(--sev-info)' }}>{msg}</span>}
           {qErr && <span style={{ color: 'var(--sev-crit)' }}>{qErr}</span>}
         </div>

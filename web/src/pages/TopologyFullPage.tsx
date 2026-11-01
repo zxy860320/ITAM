@@ -5,6 +5,8 @@ import React from 'react';
 import { topoApi, usePoll } from '../api';
 import { TopoLink } from '../components/TopoCanvas';
 import { TopoTree } from '../components/TopoTree';
+import { useTopoAuth } from '../topology/useTopoAuth';
+import { TopoAuthBar } from '../components/TopoAuthBar';
 import '../components/topo-canvas.css';
 
 export default function TopologyFullPage(_: any) {
@@ -29,6 +31,9 @@ export default function TopologyFullPage(_: any) {
       .filter(p => p.length === 2 && p[0] && p[1]) as [string, string][];
 
   // 数据维护：同步 Zabbix 节点入库 / 触发 LLDP 发现（与拓扑工作台同一后端接口，异步排队）
+  // V2 §10：写操作需管理员会话（后端 401/403 是真正闸门，前端只做体验层禁用）
+  const auth = useTopoAuth();
+  const canWrite = auth.authed && auth.role === 'admin';
   const [busy, setBusy] = React.useState('');
   const run = async (fn: () => Promise<any>, label: string, done?: () => void) => {
     setBusy(label); setMsg('');
@@ -102,14 +107,15 @@ export default function TopologyFullPage(_: any) {
           <button className="btn" onClick={() => { treeRef.current?.expandAll(); treeRef.current?.fitView(); setMsg('已按真实链路展开全部层级'); setTimeout(() => setMsg(''), 2500); }}>展开全部层级</button>
           <button className="btn" onClick={() => { treeRef.current?.collapseAll(); treeRef.current?.fitView(); setMsg('已收起，仅显示核心层'); setTimeout(() => setMsg(''), 2500); }}>仅看核心层</button>
           <button className="btn" onClick={() => treeRef.current?.fitView()}>适应画布</button>
-          <button className="btn" disabled={!!busy} title="从 Zabbix 拉取网络设备清单入库（新加设备先同步才会出现在拓扑库）"
+          <button className="btn" disabled={!canWrite || !!busy} title="从 Zabbix 拉取网络设备清单入库（新加设备先同步才会出现在拓扑库）"
             onClick={() => run(() => topoApi.sync(), '同步', () => { reloadGraph(); setMsg('同步完成，视图已刷新'); setTimeout(() => setMsg(''), 4000); })}>
             {busy === '同步' ? '同步中…' : '同步节点'}
           </button>
-          <button className="btn" disabled={!!busy} title="触发全网 LLDP 发现（异步，约 1-2 分钟；完成后自动刷新视图）"
+          <button className="btn" disabled={!canWrite || !!busy} title="触发全网 LLDP 发现（异步，约 1-2 分钟；完成后自动刷新视图）"
             onClick={() => run(() => topoApi.discoveryRun(), 'LLDP 发现', waitDiscoveryReload)}>
             {busy === 'LLDP 发现' ? '发现排队中…' : 'LLDP 发现'}
           </button>
+          <TopoAuthBar compact />
           {msg && <span style={{ fontSize: 12, color: 'var(--sev-info)' }}>{msg}</span>}
         </div>
         <div className="tc-wrap" style={{ position: 'relative' }}>

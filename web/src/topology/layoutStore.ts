@@ -42,26 +42,26 @@ export async function loadLayout(): Promise<LayoutSnapshot> {
   return { nodes, groups, meta: j.meta || { node_layout_count: 0, group_count: 0 } };
 }
 
-/** 只回写有变化的节点（增量保存，≤2000/批） */
+/** 只回写有变化的节点（增量保存，≤2000/批）。V2：操作者由服务端会话决定，前端不再自报 operator */
 export async function saveNodes(rows: {
   node_id: number; x: number; y: number; group_key?: string | null;
   layout_source: 'auto' | 'manual'; position_locked: boolean;
-}[], operator: string) {
+}[]) {
   if (!rows.length) return { ok: true, upserted: 0 };
-  return topoApi.layoutSave(rows, operator);
+  return topoApi.layoutSave(rows);
 }
 
-export async function saveGroups(rows: SavedGroupLayout[], operator: string) {
+export async function saveGroups(rows: SavedGroupLayout[]) {
   if (!rows.length) return { ok: true, upserted: 0 };
   return topoApi.layoutGroups(rows.map(g => ({
     group_key: g.group_key, label: g.label, collapsed: g.collapsed ? 1 : 0,
     x: g.x, y: g.y, w: g.w, h: g.h,
-  })), operator);
+  })));
 }
 
-/** 显式重置（唯一清除人工布局的入口，UI 必须二次确认后才调用） */
-export async function resetLayout(operator: string) {
-  return topoApi.layoutReset(operator);
+/** 显式重置（唯一清除人工布局的入口，UI 必须二次确认后才调用；重置前服务端自动打快照护栏） */
+export async function resetLayout() {
+  return topoApi.layoutReset();
 }
 
 export function knownGroupKeys(): GroupKey[] { return GROUP_ORDER; }
