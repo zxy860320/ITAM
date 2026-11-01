@@ -65,6 +65,11 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
       ZBX_SOURCE_CFG: /app/config/source.json
+      # V2 最小认证（docs/TOPOLOGY-V2-DESIGN.md §10）：首启引导管理员（仅 topo_user 空表时生效一次）
+      TOPO_ADMIN_BOOTSTRAP_USER: ${TOPO_ADMIN_BOOTSTRAP_USER:-}
+      TOPO_ADMIN_BOOTSTRAP_PASS: ${TOPO_ADMIN_BOOTSTRAP_PASS:-}
+      # 跨源开发用的 CORS 白名单；生产经 nginx /topo-api/ 同源代理，一般无需改
+      TOPO_CORS_ORIGINS: ${TOPO_CORS_ORIGINS:-http://localhost:5273,http://127.0.0.1:5273}
     volumes:
       # 只读复用 P0 的 Zabbix 凭据文件（topology-svc 从不写它）
       - ./server/data/source.json:/app/config/source.json:ro
