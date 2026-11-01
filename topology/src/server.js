@@ -1,5 +1,5 @@
 // topology-svc 入口（独立进程 :8790；P0 代码零改动）
-// API 设计见 docs/TOPOLOGY-P1-DESIGN.md §5
+// API 设计见 docs/TOPOLOGY-P1-DESIGN.md §5；V2 权限见 docs/TOPOLOGY-V2-DESIGN.md §10
 import express from 'express';
 import { openDb, metaGet, metaSet } from './db.js';
 import { CFG } from './config.js';
@@ -8,13 +8,39 @@ import { syncTopology } from './sync.js';
 import { runDiscovery, cleanupManagedItems } from './discovery.js';
 import { ifaceTraffic } from './traffic.js';
 import { refreshRouteSnapshots, snapshotStatus, tracePath, cleanupRouteItems } from './pathtrace.js';
+import { initAuth, authMiddleware, requireRole, loginRateLimited, setSessionCookie, clearSessionCookie, newToken, scryptVerify, COOKIE, SESSION_TTL } from './auth.js';
 
 const db = await openDb(CFG);
 console.log(`[topology-svc] db engine=${db.kind} @ ${db.location}`);
+await initAuth(db);
 const zbx = new Zbx(CFG.zbx);
 const app = express();
 app.use(express.json());
-app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', '*'); next(); });
+// V2：生产走 nginx /topo-api 同源代理、开发走 vite 代理——本就不依赖跨域。
+// 通配 CORS + 凭据是危险组合，收紧为显式白名单（直连调试用）。
+const CORS_ALLOW = (process.env.TOPO_CORS_ORIGINS || 'http://localhost:5273,http://127.0.0.1:5273').split(',').map(s => s.trim()).filter(Boolean);
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && CORS_ALLOW.includes(origin)) {
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Access-Control-Allow-Credentials', 'true');
+    res.set('Vary', 'Origin');
+  }
+  if (req.method === 'OPTIONS') {
+    res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type');
+    return res.sendStatus(204);
+  }
+  next();
+});
+app.use(authMiddleware(db));
+
+// 兼容期：body.operator 自报一律忽略（会话为唯一事实）；出现即 WARN 便于发现旧调用方
+function sessionOperator(req, bodyOperator) {
+  if (bodyOperator && bodyOperator !== req.auth?.user)
+    console.warn(`[auth] body.operator "${bodyOperator}" ignored; session user = ${req.auth?.user}`);
+  return req.auth?.user || 'unknown';
+}
 
 let syncRunning = false, discRunning = false, rtRunning = false;
 
@@ -28,6 +54,40 @@ function startDiscovery(nodeIds) {
     .finally(() => { discRunning = false; });
   return true;
 }
+
+// ---------- 认证（V2 §10）----------
+app.post('/api/topology/auth/login', async (req, res) => {
+  try {
+    const ip = req.ip || req.socket.remoteAddress || '?';
+    if (loginRateLimited(ip)) return res.status(429).json({ error: '登录过于频繁，稍后再试' });
+    const { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: 'username/password 必填' });
+    const u = await db.prepare('SELECT username, pass_hash, role FROM topo_user WHERE username=?').get(String(username));
+    if (!u || !scryptVerify(password, u.pass_hash)) {
+      await new Promise(r => setTimeout(r, 400)); // 抹平用户不存在/密码错的时间差
+      return res.status(401).json({ error: '用户名或密码错误' });
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const tok = newToken();
+    await db.prepare('INSERT INTO auth_session(token,username,expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?)')
+      .run(tok, u.username, now + SESSION_TTL, now, now);
+    setSessionCookie(res, tok);
+    res.json({ ok: true, user: u.username, role: u.role });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+app.post('/api/topology/auth/logout', async (req, res) => {
+  try {
+    const m = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`).exec(req.headers.cookie || '');
+    if (m) await db.prepare('DELETE FROM auth_session WHERE token=?').run(decodeURIComponent(m[1]));
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+app.get('/api/topology/auth/me', async (req, res) => {
+  const users = (await db.prepare('SELECT COUNT(*) AS n FROM topo_user').get()).n;
+  if (!req.auth) return res.json({ data: { authed: false, users_exist: users > 0 } });
+  res.json({ data: { authed: true, user: req.auth.user, role: req.auth.role } });
+});
 
 // ---------- 健康 ----------
 app.get('/health', async (req, res) => {
@@ -44,7 +104,7 @@ app.get('/health', async (req, res) => {
 });
 
 // ---------- 同步 ----------
-app.post('/api/topology/sync', async (req, res) => {
+app.post('/api/topology/sync', requireRole('admin'), async (req, res) => {
   if (syncRunning) return res.status(409).json({ error: 'sync running' });
   syncRunning = true;
   try {
@@ -132,16 +192,20 @@ function shapeLink(r) {
           iface: r.b_snapshot && JSON.parse(r.b_snapshot).port_id || null, iface_id: null },
     b_snapshot: r.b_snapshot ? JSON.parse(r.b_snapshot) : null,
     status: r.status, source: r.source, confidence: r.confidence,
+    // V2（§4）：关系语义 + VLAN/聚合上下文
+    relation_type: r.relation_type || 'lldp_half', vlan_id: r.vlan_id ?? null,
+    bandwidth_bps: r.bandwidth_bps ?? null, parent_link_id: r.parent_link_id ?? null,
     last_seen: r.last_seen, missing_rounds: r.missing_rounds,
   };
 }
 app.get('/api/topology/links', async (req, res) => {
   try {
-  const { status, source, node_id } = req.query;
+  const { status, source, node_id, relation_type } = req.query;
   const page = Math.max(1, Number(req.query.page || 1)), size = Math.min(500, Number(req.query.size || 100));
   let sql = linkSql + ' WHERE 1=1'; const args = [];
   if (status) { sql += ' AND l.status=?'; args.push(status); }
   if (source) { sql += ' AND l.source=?'; args.push(source); }
+  if (relation_type) { sql += ' AND l.relation_type=?'; args.push(relation_type); }
   if (node_id) { sql += ' AND (l.a_node=? OR l.b_node=?)'; args.push(+node_id, +node_id); }
   const total = (await db.prepare(sql.replace(linkSql.split(' FROM')[0] + ' FROM', 'SELECT COUNT(*) c FROM')).get(...args)).c;
   const rows = await db.prepare(sql + ' ORDER BY CASE l.status WHEN \'confirmed\' THEN 0 WHEN \'manual\' THEN 1 WHEN \'half\' THEN 2 WHEN \'conflict\' THEN 3 ELSE 4 END, l.link_id LIMIT ? OFFSET ?').all(...args, size, (page - 1) * size);
@@ -182,7 +246,7 @@ app.get('/api/topology/links/pending', async (req, res) => {
 // 批量确认/忽略：ids 显式列表，或 match={node_id,min_confidence,max_confidence} 按过滤条件圈定（二选一，operator 必填）
 async function bulkAction(req, res, action) {
   try {
-  const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+  const operator = sessionOperator(req, req.body?.operator); // V2：会话即操作者，body 自报忽略
   const now = Math.floor(Date.now() / 1000);
   let ids = [];
   if (Array.isArray(req.body?.link_ids) && req.body.link_ids.length) ids = req.body.link_ids.map(Number);
@@ -198,8 +262,18 @@ async function bulkAction(req, res, action) {
   const ph = ids.map(() => '?').join(',');
   let affected;
   if (action === 'confirm') {
-    affected = (await db.prepare(`UPDATE topology_link SET status='confirmed', confirmed_by=?, confirmed_at=?, note=COALESCE(?,note)
+    // V2 语义（设计 §4.2）：人工确认半链 = 语义改写为 manual_physical（LLDP 证据保留在 evidence 表）
+    affected = (await db.prepare(`UPDATE topology_link SET status='confirmed',
+      relation_type=CASE WHEN relation_type='lldp_half' THEN 'manual_physical' ELSE relation_type END,
+      confirmed_by=?, confirmed_at=?, note=COALESCE(?,note)
       WHERE link_id IN (${ph}) AND status IN ('half','conflict','stale')`).run(operator, now, req.body?.note || null, ...ids)).changes;
+    if (req.body?.note) {
+      // 证据追加式（§4.3）：每次审核备注一条 manual_note 证据行
+      for (const id of ids) {
+        await db.prepare("INSERT INTO topology_link_evidence(link_id,kind,payload,observed_at) SELECT ?,'manual_note',?,? WHERE EXISTS(SELECT 1 FROM topology_link WHERE link_id=?)")
+          .run(id, req.body.note, now, id);
+      }
+    }
   } else {
     affected = (await db.prepare(`UPDATE topology_link SET status='rejected', confirmed_by=?, confirmed_at=?, note=COALESCE(?,note)
       WHERE link_id IN (${ph}) AND status IN ('half','conflict','stale')`).run(operator, now, req.body?.reason || null, ...ids)).changes;
@@ -207,22 +281,27 @@ async function bulkAction(req, res, action) {
   res.json({ ok: true, affected, requested: ids.length });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 }
-app.post('/api/topology/links/bulk-confirm', (req, res) => bulkAction(req, res, 'confirm'));
-app.post('/api/topology/links/bulk-reject', (req, res) => bulkAction(req, res, 'reject'));
-app.post('/api/topology/links/:id/confirm', async (req, res) => {
+app.post('/api/topology/links/bulk-confirm', requireRole('admin'), (req, res) => bulkAction(req, res, 'confirm'));
+app.post('/api/topology/links/bulk-reject', requireRole('admin'), (req, res) => bulkAction(req, res, 'reject'));
+app.post('/api/topology/links/:id/confirm', requireRole('admin'), async (req, res) => {
   try {
-  const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+  const operator = sessionOperator(req, req.body?.operator);
   const l = await db.prepare('SELECT * FROM topology_link WHERE link_id=?').get(+req.params.id);
   if (!l) return res.status(404).json({ error: 'not found' });
   if (!['half', 'conflict', 'stale'].includes(l.status)) return res.status(400).json({ error: `status=${l.status} 不可确认` });
-  await db.prepare("UPDATE topology_link SET status='confirmed', confirmed_by=?, confirmed_at=?, note=COALESCE(?,note) WHERE link_id=?")
+  // V2 语义（§4.2）：半链人工确认 → relation_type 改写 manual_physical，证据链保留
+  await db.prepare(`UPDATE topology_link SET status='confirmed',
+    relation_type=CASE WHEN relation_type='lldp_half' THEN 'manual_physical' ELSE relation_type END,
+    confirmed_by=?, confirmed_at=?, note=COALESCE(?,note) WHERE link_id=?`)
     .run(operator, Math.floor(Date.now() / 1000), req.body?.note || null, l.link_id);
+  if (req.body?.note) await db.prepare('INSERT INTO topology_link_evidence(link_id,kind,payload,observed_at) VALUES(?,?,?,?)')
+    .run(l.link_id, 'manual_note', req.body.note, Math.floor(Date.now() / 1000));
   res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/links/:id/reject', async (req, res) => {
+app.post('/api/topology/links/:id/reject', requireRole('admin'), async (req, res) => {
   try {
-  const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+  const operator = sessionOperator(req, req.body?.operator);
   const l = await db.prepare('SELECT * FROM topology_link WHERE link_id=?').get(+req.params.id);
   if (!l) return res.status(404).json({ error: 'not found' });
   await db.prepare("UPDATE topology_link SET status='rejected', confirmed_by=?, confirmed_at=?, note=? WHERE link_id=?")
@@ -230,11 +309,12 @@ app.post('/api/topology/links/:id/reject', async (req, res) => {
   res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/links', async (req, res) => {
+app.post('/api/topology/links', requireRole('admin'), async (req, res) => {
   try {
-  const { a_node_id, a_interface_id, b_node_id, b_interface_id, operator, note } = req.body || {};
-  if (!a_node_id || !a_interface_id || !b_node_id || !b_interface_id || !operator)
-    return res.status(400).json({ error: 'a/b 两端节点与接口、operator 必填' });
+  const { a_node_id, a_interface_id, b_node_id, b_interface_id, note } = req.body || {};
+  const operator = sessionOperator(req, req.body?.operator);
+  if (!a_node_id || !a_interface_id || !b_node_id || !b_interface_id)
+    return res.status(400).json({ error: 'a/b 两端节点与接口必填（operator 由会话决定）' });
   if (+a_interface_id === +b_interface_id) return res.status(400).json({ error: '自环不允许' });
   const ia = await db.prepare('SELECT * FROM topology_interface WHERE interface_id=? AND node_id=? AND stale=0').get(+a_interface_id, +a_node_id);
   const ib = await db.prepare('SELECT * FROM topology_interface WHERE interface_id=? AND node_id=? AND stale=0').get(+b_interface_id, +b_node_id);
@@ -244,13 +324,16 @@ app.post('/api/topology/links', async (req, res) => {
   if (await db.prepare('SELECT link_id FROM topology_link WHERE norm_key=?').get(normKey))
     return res.status(409).json({ error: '该端点对链路已存在' });
   const now = Math.floor(Date.now() / 1000);
-  const r = await db.prepare(`INSERT INTO topology_link(norm_key,a_node,a_iface,b_node,b_iface,status,source,confidence,confirmed_by,confirmed_at,discovered_at,last_seen,note)
-    VALUES(?,?,?,?,?,'manual','manual',1,?,?,?, ?,?)`)
+  const r = await db.prepare(`INSERT INTO topology_link(norm_key,a_node,a_iface,b_node,b_iface,status,source,confidence,confirmed_by,confirmed_at,discovered_at,last_seen,note,relation_type)
+    VALUES(?,?,?,?,?,'manual','manual',1,?,?,?, ?,?,'manual_physical')`)
     .run(normKey, pair[0][0], pair[0][1], pair[1][0], pair[1][1], operator, now, now, now, note || null);
+  // V2：人工建链即证据（note 必填语义由前端约束；有 note 就落证据行）
+  if (note) await db.prepare('INSERT INTO topology_link_evidence(link_id,kind,payload,observed_at) VALUES(?,?,?,?)')
+    .run(Number(r.lastInsertRowid), 'manual_note', note, now);
   res.status(201).json({ ok: true, link_id: Number(r.lastInsertRowid) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.delete('/api/topology/links/:id', async (req, res) => {
+app.delete('/api/topology/links/:id', requireRole('admin'), async (req, res) => {
   try {
   const l = await db.prepare('SELECT * FROM topology_link WHERE link_id=?').get(+req.params.id);
   if (!l) return res.status(404).json({ error: 'not found' });
@@ -277,6 +360,17 @@ app.get('/api/topology/links/:id/traffic', async (req, res) => {
   } catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
 
+// ---------- V2：链路证据（§4.3 只读；写路径在 discovery/bulk/人工建链处） ----------
+app.get('/api/topology/links/:id/evidence', async (req, res) => {
+  try {
+  const l = await db.prepare('SELECT link_id FROM topology_link WHERE link_id=?').get(+req.params.id);
+  if (!l) return res.status(404).json({ error: 'not found' });
+  const rows = await db.prepare('SELECT evidence_id, kind, payload, source_run_id, observed_at, expires_at FROM topology_link_evidence WHERE link_id=? ORDER BY observed_at DESC, evidence_id DESC').all(l.link_id);
+  res.json({ data: rows.map(r => ({ ...r, payload: r.payload ? safeJson(r.payload) : null })) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
+
 // ---------- 图 ----------
 app.get('/api/topology/graph', async (req, res) => {
   try {
@@ -293,7 +387,8 @@ app.get('/api/topology/graph', async (req, res) => {
   // b_if 不再回退 sys_name（名称≠接口，前端按 b_snapshot 快照单独渲染"未纳管对端"）。
   const links = (await db.prepare(`SELECT l.link_id, l.norm_key, l.a_node, a.if_name a_ifname, a.oper_status a_oper, na.display_name a_name,
       l.b_node, b.if_name b_ifname, b.oper_status b_oper, nb.display_name b_name,
-      l.b_snapshot, l.status, l.source, l.confidence, l.seen_a_at, l.seen_b_at
+      l.b_snapshot, l.status, l.source, l.confidence, l.seen_a_at, l.seen_b_at,
+      l.relation_type, l.vlan_id, l.bandwidth_bps, l.parent_link_id
     FROM topology_link l
     LEFT JOIN topology_interface a ON a.interface_id=l.a_iface
     LEFT JOIN topology_interface b ON b.interface_id=l.b_iface
@@ -306,6 +401,8 @@ app.get('/api/topology/graph', async (req, res) => {
       b: r.b_node, b_if: r.b_ifname, b_oper: r.b_oper, b_name: r.b_name,
       b_snapshot: r.b_snapshot ? JSON.parse(r.b_snapshot) : null,
       status: r.status, source: r.source, confidence: r.confidence,
+      relation_type: r.relation_type || 'lldp_half', vlan_id: r.vlan_id ?? null,
+      bandwidth_bps: r.bandwidth_bps ?? null, parent_link_id: r.parent_link_id ?? null,
       seen_a_at: r.seen_a_at, seen_b_at: r.seen_b_at,
     }));
     res.json({ data: { nodes, links }, meta: { node_count: nodes.length, link_count: links.length, include: [...inc] } });
@@ -323,17 +420,17 @@ app.get('/api/topology/layout', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 // 保存布局：逐行 upsert（ON CONFLICT→toMysqlSql 翻译成 ON DUPLICATE KEY UPDATE）
-app.put('/api/topology/layout', async (req, res) => {
+app.put('/api/topology/layout', requireRole('admin'), async (req, res) => {
   try {
-    const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+    const operator = sessionOperator(req, req.body?.operator); // V2：操作者来自会话
     const list = Array.isArray(req.body?.nodes) ? req.body.nodes : null;
     if (!list) return res.status(400).json({ error: 'nodes 数组必填' });
     if (list.length > 2000) return res.status(400).json({ error: '单批最多 2000 个节点' });
     for (const nd of list) {
       if (!Number.isFinite(+nd.node_id) || !Number.isFinite(+nd.x) || !Number.isFinite(+nd.y))
         return res.status(400).json({ error: `节点 ${nd.node_id}：node_id/x/y 必须是有限数值` });
-      if (!['auto', 'manual'].includes(nd.layout_source))
-        return res.status(400).json({ error: `节点 ${nd.node_id}：layout_source 仅 auto|manual` });
+      if (!['auto', 'manual', 'suggested'].includes(nd.layout_source))
+        return res.status(400).json({ error: `节点 ${nd.node_id}：layout_source 仅 auto|manual|suggested` });
     }
     const now = Math.floor(Date.now() / 1000);
     let up = 0;
@@ -347,9 +444,9 @@ app.put('/api/topology/layout', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 // 区域（折叠态 / 容器人工位置）——同样逐行 upsert
-app.put('/api/topology/layout/groups', async (req, res) => {
+app.put('/api/topology/layout/groups', requireRole('admin'), async (req, res) => {
   try {
-    const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+    const operator = sessionOperator(req, req.body?.operator);
     const list = Array.isArray(req.body?.groups) ? req.body.groups : null;
     if (!list) return res.status(400).json({ error: 'groups 数组必填' });
     if (list.length > 100) return res.status(400).json({ error: '单批最多 100 个区域' });
@@ -370,18 +467,24 @@ app.put('/api/topology/layout/groups', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 // 显式重置：唯一允许清除人工布局的入口（设计规则：管理员主动重置才清）
-app.post('/api/topology/layout/reset', async (req, res) => {
+app.post('/api/topology/layout/reset', requireRole('admin'), async (req, res) => {
   try {
-    const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
+    const operator = sessionOperator(req, req.body?.operator);
+    // 重置前自动快照护栏（V2 §5.5：破坏性批量操作前留退路）
+    const zones = await db.prepare('SELECT * FROM topology_zone').all();
+    const layouts = await db.prepare('SELECT * FROM topology_layout').all();
+    await db.prepare('INSERT INTO topology_layout_snapshot(name,kind,zones_json,layout_json,created_by,created_at) VALUES(?,?,?,?,?,?)')
+      .run('pre-reset auto', 'auto_pre', JSON.stringify(zones), JSON.stringify(layouts), operator, Math.floor(Date.now() / 1000));
     const r1 = await db.prepare('DELETE FROM topology_layout').run();
     const r2 = await db.prepare('DELETE FROM topology_group').run();
-    console.log(`[layout] reset by ${operator}: nodes=${r1.changes} groups=${r2.changes}`);
-    res.json({ ok: true, cleared: { layout_rows: r1.changes, group_rows: r2.changes } });
+    const r3 = await db.prepare('DELETE FROM topology_zone').run();
+    console.log(`[layout] reset by ${operator}: nodes=${r1.changes} groups=${r2.changes} zones=${r3.changes}`);
+    res.json({ ok: true, cleared: { layout_rows: r1.changes, group_rows: r2.changes, zone_rows: r3.changes } });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ---------- 发现 ----------
-app.post('/api/topology/discovery/run', async (req, res) => {
+app.post('/api/topology/discovery/run', requireRole('admin'), async (req, res) => {
   if (discRunning) return res.status(409).json({ error: 'discovery running' });
   const nodeIds = req.body?.node_ids || null;
   startDiscovery(nodeIds);
@@ -427,7 +530,7 @@ app.get('/api/topology/discovery/summary', async (req, res) => {
   } });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/discovery/cleanup', async (req, res) => {
+app.post('/api/topology/discovery/cleanup', requireRole('admin'), async (req, res) => {
   try { res.json({ ok: true, deleted: await cleanupManagedItems(zbx) }); }
   catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
@@ -459,7 +562,7 @@ app.get('/api/topology/pathtrace/status', async (req, res) => {
   res.json({ data: s.data, meta: { last_refresh: s.last_refresh, refreshing: rtRunning } });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/pathtrace/refresh', async (req, res) => {
+app.post('/api/topology/pathtrace/refresh', requireRole('admin'), async (req, res) => {
   try {
   if (!zbx.ok()) return res.status(400).json({ error: 'Zabbix 凭据缺失：检查挂载文件 /app/config/source.json（宿主机 ./server/data/source.json）是否含 endpoint 与 token' });
   if (rtRunning) return res.status(409).json({ error: 'route snapshot refresh running' });
@@ -471,7 +574,7 @@ app.post('/api/topology/pathtrace/refresh', async (req, res) => {
   res.status(202).json({ queued: (nodeIds || (await db.prepare("SELECT node_id FROM topology_node WHERE status<>'stale' AND (display_name LIKE '%核心%' OR display_name LIKE '%CORE%' OR display_name LIKE '%汇聚%' OR display_name LIKE '%AGG%' OR display_name LIKE '%FW%' OR display_name LIKE '%防火墙%' OR display_name LIKE '%互联网%' OR display_name LIKE '%接入区%')").all())).length, note: '异步执行（每批创建托管项→等待首轮→读取→删除），GET /api/topology/pathtrace/status 查看' });
   } catch (e) { rtRunning = false; res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/pathtrace/cleanup', async (req, res) => {
+app.post('/api/topology/pathtrace/cleanup', requireRole('admin'), async (req, res) => {
   try { res.json({ ok: true, deleted: await cleanupRouteItems(zbx) }); }
   catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });

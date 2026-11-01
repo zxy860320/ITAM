@@ -32,10 +32,18 @@ export async function applyObservations(db, source, observations, runTs, observe
   const findIfaceByName = db.prepare(`SELECT interface_id FROM topology_interface
     WHERE node_id=? AND stale=0 AND if_name=? LIMIT 1`);
   const getLink = db.prepare('SELECT * FROM topology_link WHERE norm_key=?');
+  // V2（设计 §4）：新链初始语义 lldp_half；双端合流升 confirmed 时改 lldp_confirmed。
+  // 证据 1:*（topology_link_evidence）：观察方向 + 半链原始快照留证，同类只写一次（幂等）。
   const insLink = db.prepare(`INSERT INTO topology_link(norm_key,a_node,a_iface,b_node,b_iface,b_snapshot,status,source,confidence,
-    seen_a_at,seen_b_at,discovered_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const updLink = db.prepare(`UPDATE topology_link SET status=?, confidence=?, seen_a_at=?, seen_b_at=?,
+    seen_a_at,seen_b_at,discovered_at,last_seen,relation_type) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'lldp_half')`);
+  const updLink = db.prepare(`UPDATE topology_link SET status=?, relation_type=?, confidence=?, seen_a_at=?, seen_b_at=?,
     last_seen=?, missing_rounds=0, b_snapshot=COALESCE(?,b_snapshot) WHERE link_id=?`);
+  const hasEvidence = db.prepare('SELECT 1 AS ok FROM topology_link_evidence WHERE link_id=? AND kind=? LIMIT 1');
+  const insEvidence = db.prepare('INSERT INTO topology_link_evidence(link_id,kind,payload,source_run_id,observed_at) VALUES(?,?,?,?,?)');
+  const ensureEvidence = async (linkId, kind, payload, runId, ts) => {
+    if (await hasEvidence.get(linkId, kind)) return;
+    await insEvidence.run(linkId, kind, payload ? JSON.stringify(payload) : null, runId || null, ts);
+  };
 
   for (const ob of observations) {
     const node = await getNode.get(ob.hostid);
@@ -95,13 +103,24 @@ export async function applyObservations(db, source, observations, runTs, observe
         else if (status !== 'manual' && status !== 'confirmed' && status !== 'rejected') status = 'half';
         if (status === 'confirmed' && existing.status !== 'confirmed') stat.confirmed++;
         if (status === 'half' && existing.status !== 'half') stat.half++;
-        await updLink.run(status, Math.max(conf, existing.confidence || 0), sA, sB, ts,
+        // 语义列：人工物理链永不被 LLDP 流程改写；双端合流升 lldp_confirmed
+        const rt = existing.relation_type === 'manual_physical' ? 'manual_physical'
+          : (status === 'confirmed' ? 'lldp_confirmed' : 'lldp_half');
+        await updLink.run(status, rt, Math.max(conf, existing.confidence || 0), sA, sB, ts,
           bIface ? null : JSON.stringify(snapshot), existing.link_id);
         stat.updated++;
+        if (tsA) await ensureEvidence(existing.link_id, 'lldp_a', null, ob.record_id, ts);
+        if (tsB) await ensureEvidence(existing.link_id, 'lldp_b', null, ob.record_id, ts);
+        if (!bIface) await ensureEvidence(existing.link_id, 'lldp_raw', snapshot, ob.record_id, ts);
       } else {
         const status = 'half'; // 单轮只见单方向；双端确认走上面的 existing 分支
-        if (bIface) await insLink.run(normKey, pair[0][0], pair[0][1], pair[1][0], pair[1][1], JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
-        else await insLink.run(normKey, node.node_id, aIface.interface_id, bNodeId, null, JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
+        let ins;
+        if (bIface) ins = await insLink.run(normKey, pair[0][0], pair[0][1], pair[1][0], pair[1][1], JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
+        else ins = await insLink.run(normKey, node.node_id, aIface.interface_id, bNodeId, null, JSON.stringify(snapshot), status, source, conf, tsA, tsB, ts, ts);
+        const newId = Number(ins.lastInsertRowid);
+        if (tsA) await ensureEvidence(newId, 'lldp_a', null, ob.record_id, ts);
+        if (tsB) await ensureEvidence(newId, 'lldp_b', null, ob.record_id, ts);
+        if (!bIface) await ensureEvidence(newId, 'lldp_raw', snapshot, ob.record_id, ts);
         stat.new++;
         if (status === 'half') stat.half++;
       }

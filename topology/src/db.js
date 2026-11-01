@@ -86,10 +86,49 @@ async function openMysql(my) {
   };
 }
 
+// ---------- V2 增量（docs/TOPOLOGY-V2-DESIGN.md §7） ----------
+// relation_type 七枚举（§4.1）；norm_key 前缀命名空间：L:/H: 物理沿用，G: agg、R: route、V: vrrp、S: stack
+export const RELATION_TYPES = ['lldp_confirmed', 'lldp_half', 'manual_physical', 'agg_lacp', 'route_nexthop', 'vrrp', 'stack'];
+
+// 列存在性检查（幂等增列用）：MySQL 查 information_schema，sqlite 查 PRAGMA
+async function hasColumn(db, table, col) {
+  if (db.kind === 'mysql') {
+    const r = await db.prepare('SELECT 1 AS ok FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?').get(table, col);
+    return !!r;
+  }
+  const rows = await db.prepare(`PRAGMA table_info(${table})`).all();
+  return rows.some(r => r.name === col);
+}
+
+// 旧库（V1.5 及更早）打开后自动补齐 V2 列——全部可空/带默认值，旧代码零感知。
+// 数据回填（relation_type 映射、group→zone、evidence）不在这里做，见 scripts/migrate-v1-to-v2.mjs。
+export async function ensureV2(db) {
+  const alter = async (table, col, ddl) => {
+    if (await hasColumn(db, table, col)) return false;
+    await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${ddl}`).run();
+    return true;
+  };
+  // topology_link：关系语义 + 聚合父子 + VLAN 上下文 + 聚合带宽冗余
+  await alter('topology_link', 'relation_type', "relation_type VARCHAR(32) NOT NULL DEFAULT 'lldp_confirmed'");
+  await alter('topology_link', 'parent_link_id', 'parent_link_id INT');
+  await alter('topology_link', 'vlan_id', 'vlan_id INT');
+  await alter('topology_link', 'bandwidth_bps', 'bandwidth_bps BIGINT');
+  // topology_layout：人工区域隶属（zone_id）；坐标语义不变
+  await alter('topology_layout', 'zone_id', 'zone_id INT');
+  // zone_id 索引（新列上建，双方言各自写法；已存在则跳过）
+  if (db.kind === 'mysql') {
+    const idx = await db.prepare('SELECT 1 AS ok FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND index_name=?').get('topology_layout', 'idx_layout_zone');
+    if (!idx) await db.prepare('CREATE INDEX idx_layout_zone ON topology_layout (zone_id)').run();
+  } else {
+    await db.prepare('CREATE INDEX IF NOT EXISTS idx_layout_zone ON topology_layout(zone_id)').run();
+  }
+}
+
 // ---------- 打开入口（CFG.db 决定引擎） ----------
 export async function openDb(cfg) {
-  if (cfg.dbKind === 'mysql') return openMysql(cfg.mysql);
-  return openSqlite(cfg.dbFile);
+  const db = cfg.dbKind === 'mysql' ? await openMysql(cfg.mysql) : await openSqlite(cfg.dbFile);
+  await ensureV2(db);
+  return db;
 }
 
 // ---------- meta（k/v 表；双方言各写一条） ----------
@@ -194,12 +233,51 @@ const SQLITE_SCHEMA = `
     updated_at      INTEGER
   );
   CREATE TABLE IF NOT EXISTS topology_group (
-    group_key  TEXT PRIMARY KEY,                   -- internet|firewall|core|dc|office|prod|wireless|other
+    group_key  TEXT PRIMARY KEY,                   -- V2 起冻结只读（迁移备份源，退役见设计 §12 Q9）
     label      TEXT,
     collapsed  INTEGER DEFAULT 0,
     x          REAL, y REAL, w REAL, h REAL,       -- 区域容器人工位置/尺寸（NULL=按成员自动包络）
     updated_at INTEGER
   );
+  -- ===== V2（设计 §7）=====
+  -- 区域：管理员资产，非算法产物；系统只出建议不落库
+  CREATE TABLE IF NOT EXISTS topology_zone (
+    zone_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    bg_color     TEXT DEFAULT '#f0f5ff',
+    border_color TEXT,
+    border_style TEXT DEFAULT 'solid',             -- solid | dashed | none
+    border_width REAL DEFAULT 1,
+    parent_zone_id INTEGER,                        -- 嵌套子区域（自引用可空）
+    note         TEXT,                             -- 富标注（机房/机柜编号，参考图红字）
+    collapsed    INTEGER DEFAULT 0,
+    x REAL, y REAL, w REAL, h REAL,                -- 人工位置/尺寸（NULL=按成员自动包络）
+    sort_hint    INTEGER DEFAULT 0,                -- 初始建议层级（0=顶层往下）
+    created_by   TEXT, created_at INTEGER,
+    updated_by   TEXT, updated_at INTEGER
+  );
+  -- 链路证据 1:*（§4.3）：一条关系挂多条多类证据，半链升格不丢历史
+  CREATE TABLE IF NOT EXISTS topology_link_evidence (
+    evidence_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_id       INTEGER NOT NULL REFERENCES topology_link(link_id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL,                   -- lldp_a | lldp_b | lldp_raw | manual_note | route_snapshot | lacp_snapshot | vrrp_snapshot | stack_snapshot
+    payload       TEXT,                            -- JSON/原文（raw walk 片段等）
+    source_run_id TEXT,
+    observed_at   INTEGER,
+    expires_at    INTEGER                          -- 预留：证据有效期（如 route 快照）
+  );
+  CREATE INDEX IF NOT EXISTS idx_evidence_link ON topology_link_evidence(link_id);
+  -- 布局快照/回滚（§5.5）：zones+layout 全量 JSON；批量操作前自动护栏快照
+  CREATE TABLE IF NOT EXISTS topology_layout_snapshot (
+    snapshot_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    kind         TEXT DEFAULT 'manual',            -- manual | auto_pre | discovery_pre
+    zones_json   TEXT NOT NULL,
+    layout_json  TEXT NOT NULL,
+    created_by   TEXT,
+    created_at   INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_snapshot_created ON topology_layout_snapshot(created_at);
 `;
 
 // ---------- schema：MySQL（utf8mb4；speed_bps BIGINT——实测有 4e16 脏值；
@@ -308,5 +386,42 @@ const MYSQL_SCHEMA = [
     collapsed  INT DEFAULT 0,
     x          DOUBLE, y DOUBLE, w DOUBLE, h DOUBLE,
     updated_at BIGINT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  // ===== V2（设计 §7，与 sqlite 侧成对）=====
+  `CREATE TABLE IF NOT EXISTS topology_zone (
+    zone_id       INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name          VARCHAR(128) NOT NULL,
+    bg_color      VARCHAR(32) DEFAULT '#f0f5ff',
+    border_color  VARCHAR(32),
+    border_style  VARCHAR(16) DEFAULT 'solid',
+    border_width  DOUBLE DEFAULT 1,
+    parent_zone_id INT,
+    note          TEXT,
+    collapsed     INT DEFAULT 0,
+    x             DOUBLE, y DOUBLE, w DOUBLE, h DOUBLE,
+    sort_hint     INT DEFAULT 0,
+    created_by    VARCHAR(128), created_at BIGINT,
+    updated_by    VARCHAR(128), updated_at BIGINT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS topology_link_evidence (
+    evidence_id   INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    link_id       INT NOT NULL,
+    kind          VARCHAR(32) NOT NULL,
+    payload       LONGTEXT,
+    source_run_id VARCHAR(64),
+    observed_at   BIGINT,
+    expires_at    BIGINT,
+    INDEX idx_evidence_link (link_id),
+    CONSTRAINT fk_ev_link FOREIGN KEY (link_id) REFERENCES topology_link(link_id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+  `CREATE TABLE IF NOT EXISTS topology_layout_snapshot (
+    snapshot_id  INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name         VARCHAR(128) NOT NULL,
+    kind         VARCHAR(16) DEFAULT 'manual',
+    zones_json   LONGTEXT NOT NULL,
+    layout_json  LONGTEXT NOT NULL,
+    created_by   VARCHAR(128),
+    created_at   BIGINT,
+    INDEX idx_snapshot_created (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 ];
