@@ -14,4 +14,36 @@
 
 .tg6-modalmask { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 60; display: flex; align-items: center; justify-content: center; }
 .tg6-modal { width: min(560px, 92vw); background: var(--bg-card, #141417); border: 1px solid #27272A; border-radius: 10px; padding: 18px 20px; }
+.tg6-modal.wide { width: min(720px, 94vw); max-height: 84vh; display: flex; flex-direction: column; }
 .tg6-note { font-size: 12px; color: #A1A1AA; line-height: 1.7; margin-top: 8px; }
+
+/* ---------- V2 区域管理侧栏 ---------- */
+.tc-zones { padding: 4px 2px; }
+.tc-sec-title { font-size: 12px; font-weight: 700; color: var(--text-1, #E4E4E7); margin: 8px 0 4px; display: flex; gap: 8px; align-items: baseline; }
+.tc-sec-title .s { font-weight: 400; font-size: 11px; color: var(--text-3, #71717A); }
+.tc-empty { font-size: 12px; color: var(--text-3, #71717A); padding: 8px 2px; line-height: 1.7; }
+.tc-zone { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid #232327; border-radius: 6px; margin: 4px 0; background: rgba(255,255,255,.02); }
+.tc-zswatch { width: 16px; height: 16px; border-radius: 4px; flex: none; border: 2px solid; }
+.tc-zinfo { flex: 1; min-width: 0; font-size: 12px; cursor: pointer; }
+.tc-zinfo .s { color: var(--text-3, #71717A); font-size: 11px; }
+.btn.mini { padding: 3px 8px; font-size: 11px; }
+.tc-picklist { max-height: 300px; overflow-y: auto; border: 1px solid #232327; border-radius: 6px; }
+.tc-pick { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 12px; border-bottom: 1px solid #1c1c20; cursor: pointer; }
+.tc-pick:last-child { border-bottom: none; }
+.tc-pick .s { margin-left: auto; font-size: 10px; color: var(--text-3, #71717A); }
+
+/* ---------- 建区/编辑区表单 ---------- */
+.tc-form { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.tc-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2, #A1A1AA); }
+.tc-form input, .tc-form select { font-size: 13px; }
+.tc-form .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tc-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tc-pre { width: 22px; height: 22px; border-radius: 5px; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.tc-pre.on { border-color: #22D3EE; box-shadow: 0 0 0 2px rgba(34,211,238,.25); }
+
+/* ---------- 连通建议列表 ---------- */
+.tc-suglist { overflow-y: auto; min-height: 60px; }
+.tc-sug { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid #232327; border-radius: 6px; margin: 4px 0; font-size: 12px; }
+.tc-sug > div { flex: 1; min-width: 0; }
+.tc-sug .s { color: var(--text-3, #71717A); font-size: 11px; }
+.tc-sug .mono { word-break: break-all; }

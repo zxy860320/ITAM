@@ -148,6 +148,23 @@ async function tput<T = any>(path: string, body?: any): Promise<T> {
   if (!r.ok) throw new Error(j?.error || `${path} -> ${r.status}`);
   return j;
 }
+async function tpatch<T = any>(path: string, body?: any): Promise<T> {
+  const r = await fetch(TBASE + path, {
+    method: 'PATCH',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error || `${path} -> ${r.status}`);
+  return j;
+}
+async function tdel<T = any>(path: string): Promise<T> {
+  const r = await fetch(TBASE + path, { method: 'DELETE', credentials: 'include' });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error || `${path} -> ${r.status}`);
+  return j;
+}
 export const topoAuth = {
   me: () => tget('/topology/auth/me'),
   login: (username: string, password: string) => tpost('/topology/auth/login', { username, password }),
@@ -178,7 +195,18 @@ export const topoApi = {
   layoutGet: () => tget('/topology/layout'),
   layoutSave: (nodes: any[]) => tput('/topology/layout', { nodes }),
   layoutGroups: (groups: any[]) => tput('/topology/layout/groups', { groups }),
+  // V2 Phase 2：坐标+区域隶属事务性批量写（行可带 zone_id，x/y 可为 null）
+  layoutBatch: (nodes: any[]) => tput('/topology/layout/batch', { nodes }),
   layoutReset: () => tpost('/topology/layout/reset', {}),
+  // V2 Phase 2 区域（管理员资产：系统绝不自动创建，suggestions 仅供参考）
+  zonesGet: (members = false) => tget(`/topology/zones${members ? '?members=1' : ''}`),
+  zonesSuggestions: () => tget('/topology/zones/suggestions'),
+  createZone: (body: any) => tpost('/topology/zones', body),
+  updateZone: (id: number, body: any) => tput(`/topology/zones/${id}`, body),
+  patchZoneGeometry: (id: number, body: { x?: number | null; y?: number | null; w?: number | null; h?: number | null; collapsed?: 0 | 1 }) =>
+    tpatch(`/topology/zones/${id}/geometry`, body),
+  deleteZone: (id: number) => tdel(`/topology/zones/${id}`),
+  addMembers: (id: number, node_ids: number[]) => tpost(`/topology/zones/${id}/members`, { node_ids }),
 };
 
 /** 通用轮询 hook；key 变化（筛选/翻页/搜索）立即重新拉取，不必等轮询周期 */

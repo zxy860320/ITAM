@@ -414,9 +414,20 @@ app.get('/api/topology/graph', async (req, res) => {
 // 设备删除不级联删布局行（无外键），仅 /layout/reset 显式清空——布局历史不丢。
 app.get('/api/topology/layout', async (req, res) => {
   try {
-    const nodes = await db.prepare('SELECT node_id, group_key, x, y, layout_source, `position_locked`, updated_by, updated_at FROM topology_layout').all();
-    const groups = await db.prepare('SELECT group_key, label, collapsed, x, y, w, h, updated_at FROM topology_group').all();
-    res.json({ data: { nodes, groups }, meta: { node_layout_count: nodes.length, group_count: groups.length } });
+    const nodes = await db.prepare('SELECT node_id, group_key, zone_id, x, y, layout_source, `position_locked`, updated_by, updated_at FROM topology_layout').all();
+    // V2 读路径切 zone：zones 为新权威；groups 为兼容 shim（保留一个版本）。
+    // zone 表为空且旧 topology_group 有数据（生产未跑迁移脚本的过渡态）→ shim 直接回退读旧表
+    const zones = await db.prepare('SELECT zone_id, name, bg_color, border_color, border_style, border_width, parent_zone_id, note, collapsed, x, y, w, h, sort_hint FROM topology_zone ORDER BY sort_hint ASC, zone_id ASC').all();
+    let groups;
+    if (zones.length) {
+      groups = zones.map(z => ({
+        group_key: `z${z.zone_id}`, label: z.name, collapsed: z.collapsed,
+        x: z.x, y: z.y, w: z.w, h: z.h, zone_id: z.zone_id,
+      }));
+    } else {
+      groups = await db.prepare('SELECT group_key, label, collapsed, x, y, w, h FROM topology_group').all();
+    }
+    res.json({ data: { nodes, groups, zones }, meta: { node_layout_count: nodes.length, group_count: groups.length, zone_count: zones.length } });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 // 保存布局：逐行 upsert（ON CONFLICT→toMysqlSql 翻译成 ON DUPLICATE KEY UPDATE）
@@ -466,6 +477,45 @@ app.put('/api/topology/layout/groups', requireRole('admin'), async (req, res) =>
     res.json({ ok: true, upserted: up, at: now });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
+// V2 §8.2 /layout/batch：拖动落点批量写（坐标 + zone 隶属，逐行 upsert 幂等）
+// 与 PUT /layout 的区别：行可带 zone_id（拖入/拖出区域即时语义）；x/y 可为 null（新入区未定位）
+app.put('/api/topology/layout/batch', requireRole('admin'), async (req, res) => {
+  try {
+    const operator = sessionOperator(req, req.body?.operator);
+    const list = Array.isArray(req.body?.nodes) ? req.body.nodes : null;
+    if (!list) return res.status(400).json({ error: 'nodes 数组必填' });
+    if (list.length > 2000) return res.status(400).json({ error: '单批最多 2000 个节点' });
+    for (const nd of list) {
+      if (!Number.isFinite(+nd.node_id)) return res.status(400).json({ error: `node_id 非法：${nd.node_id}` });
+      if (nd.x !== null && nd.x !== undefined && !Number.isFinite(+nd.x)) return res.status(400).json({ error: `节点 ${nd.node_id}：x 需为数值或 null` });
+      if (nd.y !== null && nd.y !== undefined && !Number.isFinite(+nd.y)) return res.status(400).json({ error: `节点 ${nd.node_id}：y 需为数值或 null` });
+      if (nd.layout_source !== undefined && !['auto', 'manual', 'suggested'].includes(nd.layout_source))
+        return res.status(400).json({ error: `节点 ${nd.node_id}：layout_source 仅 auto|manual|suggested` });
+    }
+    // zone_id 引用校验（一次性取全部有效 zone）
+    const validZones = new Set((await db.prepare('SELECT zone_id FROM topology_zone').all()).map(z => z.zone_id));
+    const now = Math.floor(Date.now() / 1000);
+    let up = 0;
+    for (const nd of list) {
+      const zid = nd.zone_id === undefined || nd.zone_id === null ? null : +nd.zone_id;
+      if (zid !== null && !validZones.has(zid)) return res.status(400).json({ error: `zone_id ${zid} 不存在` });
+      const x = nd.x === undefined || nd.x === null ? null : +nd.x;
+      const y = nd.y === undefined || nd.y === null ? null : +nd.y;
+      const src = nd.layout_source || 'manual';
+      const row = await db.prepare('SELECT node_id FROM topology_layout WHERE node_id=?').get(+nd.node_id);
+      if (row) {
+        await db.prepare('UPDATE topology_layout SET x=?, y=?, layout_source=?, `position_locked`=?, zone_id=?, updated_by=?, updated_at=? WHERE node_id=?')
+          .run(x, y, src, nd.position_locked ? 1 : 0, zid, String(operator), now, +nd.node_id);
+      } else {
+        await db.prepare('INSERT INTO topology_layout(node_id, group_key, x, y, layout_source, `position_locked`, zone_id, updated_by, updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+          .run(+nd.node_id, null, x, y, src, nd.position_locked ? 1 : 0, zid, String(operator), now);
+      }
+      up++;
+    }
+    res.json({ ok: true, upserted: up, at: now });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // 显式重置：唯一允许清除人工布局的入口（设计规则：管理员主动重置才清）
 app.post('/api/topology/layout/reset', requireRole('admin'), async (req, res) => {
   try {
@@ -480,6 +530,212 @@ app.post('/api/topology/layout/reset', requireRole('admin'), async (req, res) =>
     const r3 = await db.prepare('DELETE FROM topology_zone').run();
     console.log(`[layout] reset by ${operator}: nodes=${r1.changes} groups=${r2.changes} zones=${r3.changes}`);
     res.json({ ok: true, cleared: { layout_rows: r1.changes, group_rows: r2.changes, zone_rows: r3.changes } });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ---------- V2 区域 Zone（§5/§8.2：管理员资产；系统只出建议、绝不自动建行）----------
+const ZONE_BORDER_STYLES = ['solid', 'dashed', 'none'];
+const ZONE_COLS = 'zone_id, name, bg_color, border_color, border_style, border_width, parent_zone_id, note, collapsed, x, y, w, h, sort_hint, created_by, created_at, updated_by, updated_at';
+const isZoneColor = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v);
+const znum = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(+v)) ? null : +v;
+
+app.get('/api/topology/zones', async (req, res) => {
+  try {
+    const zones = await db.prepare(`SELECT ${ZONE_COLS},
+      (SELECT COUNT(*) FROM topology_layout l WHERE l.zone_id = z.zone_id) AS member_count
+      FROM topology_zone z ORDER BY sort_hint ASC, zone_id ASC`).all();
+    let members = null;
+    if (['1', 'true'].includes(String(req.query.members || '')))
+      members = await db.prepare('SELECT zone_id, node_id FROM topology_layout WHERE zone_id IS NOT NULL').all();
+    res.json({ data: { zones, members }, meta: { zone_count: zones.length } });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// 只读建议（§5.1「不自动创建虚假区域」）：未分区设备按既有确认链路聚类，只返回、不落库
+app.get('/api/topology/zones/suggestions', async (req, res) => {
+  try {
+    const unassigned = await db.prepare(`
+      SELECT n.node_id, n.display_name FROM topology_node n
+      WHERE n.node_id NOT IN (SELECT node_id FROM topology_layout WHERE zone_id IS NOT NULL)`).all();
+    const ids = new Set(unassigned.map(n => n.node_id));
+    const nameOf = new Map(unassigned.map(n => [n.node_id, n.display_name]));
+    const adj = new Map();
+    const links = await db.prepare(`SELECT a_node, b_node FROM topology_link
+      WHERE status IN ('confirmed','manual') AND relation_type IN ('lldp_confirmed','manual_physical')`).all();
+    for (const l of links) {
+      if (ids.has(l.a_node) && ids.has(l.b_node) && l.a_node !== l.b_node) {
+        if (!adj.has(l.a_node)) adj.set(l.a_node, new Set());
+        if (!adj.has(l.b_node)) adj.set(l.b_node, new Set());
+        adj.get(l.a_node).add(l.b_node); adj.get(l.b_node).add(l.a_node);
+      }
+    }
+    const seen = new Set(); const clusters = [];
+    for (const start of ids) {
+      if (seen.has(start)) continue;
+      const comp = []; const stack = [start]; seen.add(start);
+      while (stack.length) {
+        const cur = stack.pop(); comp.push(cur);
+        for (const nb of (adj.get(cur) || [])) if (!seen.has(nb)) { seen.add(nb); stack.push(nb); }
+      }
+      if (comp.length >= 2) {
+        const names = comp.map(id => nameOf.get(id) || String(id));
+        // 公共前缀做建议名（去尾部数字/分隔符后 ≥3 字符才用，否则用首个名称）
+        let pre = names[0];
+        for (const nm of names.slice(1)) {
+          let i = 0; while (i < pre.length && i < nm.length && pre[i] === nm[i]) i++;
+          pre = pre.slice(0, i);
+        }
+        pre = pre.replace(/[\s\-_.]+$/, '');
+        clusters.push({
+          node_ids: comp.sort((a, b) => a - b),
+          suggested_name: pre.length >= 3 ? pre : names[0],
+          size: comp.length,
+        });
+      }
+    }
+    clusters.sort((a, b) => b.size - a.size);
+    res.json({
+      data: clusters.slice(0, 30),
+      meta: { unassigned_count: ids.size, cluster_count: clusters.length, note: '建议仅供人工采纳（POST /zones 建行），系统不自动创建区域' },
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/api/topology/zones', requireRole('admin'), async (req, res) => {
+  try {
+    const operator = sessionOperator(req, req.body?.operator);
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name || name.length > 64) return res.status(400).json({ error: 'name 必填（1-64 字符）' });
+    if (b.bg_color != null && !isZoneColor(b.bg_color)) return res.status(400).json({ error: 'bg_color 需为 #hex 色值' });
+    if (b.border_color != null && !isZoneColor(b.border_color)) return res.status(400).json({ error: 'border_color 需为 #hex 色值' });
+    const border_style = b.border_style ?? 'solid';
+    if (!ZONE_BORDER_STYLES.includes(border_style)) return res.status(400).json({ error: `border_style 仅 ${ZONE_BORDER_STYLES.join('|')}` });
+    const bw = b.border_width == null ? 1 : +b.border_width;
+    if (!Number.isFinite(bw) || bw < 0 || bw > 8) return res.status(400).json({ error: 'border_width 需为 0-8' });
+    const parent = b.parent_zone_id == null ? null : +b.parent_zone_id;
+    if (parent !== null) {
+      const p = await db.prepare('SELECT zone_id FROM topology_zone WHERE zone_id=?').get(parent);
+      if (!p) return res.status(400).json({ error: `parent_zone_id ${parent} 不存在` });
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const r = await db.prepare(`INSERT INTO topology_zone(name,bg_color,border_color,border_style,border_width,parent_zone_id,note,collapsed,x,y,w,h,sort_hint,created_by,created_at,updated_by,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(name, isZoneColor(b.bg_color) ? b.bg_color : '#f0f5ff', isZoneColor(b.border_color) ? b.border_color : null,
+        border_style, bw, parent, b.note ? String(b.note).slice(0, 200) : null, b.collapsed ? 1 : 0,
+        znum(b.x), znum(b.y), znum(b.w), znum(b.h),
+        Number.isFinite(+b.sort_hint) ? +b.sort_hint : 0, String(operator), now, String(operator), now);
+    const zone = await db.prepare(`SELECT ${ZONE_COLS} FROM topology_zone WHERE zone_id=?`).get(Number(r.lastInsertRowid));
+    console.log(`[zone] created #${zone.zone_id} "${name}" by ${operator}`);
+    res.json({ ok: true, zone });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// PUT：语义字段（名称/颜色/边框/note/sort_hint/父子）；几何高频写走 PATCH geometry
+app.put('/api/topology/zones/:id', requireRole('admin'), async (req, res) => {
+  try {
+    const operator = sessionOperator(req, req.body?.operator);
+    const zid = +req.params.id;
+    const z = await db.prepare('SELECT zone_id FROM topology_zone WHERE zone_id=?').get(zid);
+    if (!z) return res.status(404).json({ error: 'zone not found' });
+    const b = req.body || {};
+    if (['x', 'y', 'w', 'h', 'collapsed'].some(k => b[k] !== undefined))
+      return res.status(400).json({ error: '几何/折叠请用 PATCH /zones/:id/geometry' });
+    const sets = []; const args = [];
+    if (b.name !== undefined) {
+      const nm = String(b.name).trim();
+      if (!nm || nm.length > 64) return res.status(400).json({ error: 'name 需为 1-64 字符' });
+      sets.push('name=?'); args.push(nm);
+    }
+    if (b.bg_color !== undefined) { if (b.bg_color !== null && !isZoneColor(b.bg_color)) return res.status(400).json({ error: 'bg_color 需为 #hex' }); sets.push('bg_color=?'); args.push(b.bg_color); }
+    if (b.border_color !== undefined) { if (b.border_color !== null && !isZoneColor(b.border_color)) return res.status(400).json({ error: 'border_color 需为 #hex' }); sets.push('border_color=?'); args.push(b.border_color); }
+    if (b.border_style !== undefined) { if (!ZONE_BORDER_STYLES.includes(b.border_style)) return res.status(400).json({ error: `border_style 仅 ${ZONE_BORDER_STYLES.join('|')}` }); sets.push('border_style=?'); args.push(b.border_style); }
+    if (b.border_width !== undefined) { const w = +b.border_width; if (!Number.isFinite(w) || w < 0 || w > 8) return res.status(400).json({ error: 'border_width 需为 0-8' }); sets.push('border_width=?'); args.push(w); }
+    if (b.note !== undefined) { sets.push('note=?'); args.push(b.note === null ? null : String(b.note).slice(0, 200)); }
+    if (b.sort_hint !== undefined) { if (!Number.isFinite(+b.sort_hint)) return res.status(400).json({ error: 'sort_hint 需为数值' }); sets.push('sort_hint=?'); args.push(+b.sort_hint); }
+    if (b.parent_zone_id !== undefined) {
+      const p = b.parent_zone_id === null ? null : +b.parent_zone_id;
+      if (p !== null) {
+        if (p === zid) return res.status(400).json({ error: '父区域不能是自身' });
+        const pc = await db.prepare('SELECT COUNT(*) AS c FROM topology_zone WHERE parent_zone_id=?').get(zid);
+        if (p && pc && pc.c > 0) return res.status(400).json({ error: '该区域有子区域，不支持再嵌套一层（当前限两级）' });
+        const pp = await db.prepare('SELECT zone_id FROM topology_zone WHERE zone_id=?').get(p);
+        if (!pp) return res.status(400).json({ error: `parent_zone_id ${p} 不存在` });
+      }
+      sets.push('parent_zone_id=?'); args.push(p);
+    }
+    if (!sets.length) return res.status(400).json({ error: '无可用更新字段' });
+    const now = Math.floor(Date.now() / 1000);
+    sets.push('updated_by=?', 'updated_at=?'); args.push(String(operator), now);
+    await db.prepare(`UPDATE topology_zone SET ${sets.join(',')} WHERE zone_id=?`).run(...args, zid);
+    const zone = await db.prepare(`SELECT ${ZONE_COLS} FROM topology_zone WHERE zone_id=?`).get(zid);
+    res.json({ ok: true, zone });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// PATCH geometry：拖动/缩放/折叠（前端 debounce 500ms 合并后高频写；幂等 set）
+app.patch('/api/topology/zones/:id/geometry', requireRole('admin'), async (req, res) => {
+  try {
+    const operator = sessionOperator(req, req.body?.operator);
+    const zid = +req.params.id;
+    const z = await db.prepare('SELECT zone_id FROM topology_zone WHERE zone_id=?').get(zid);
+    if (!z) return res.status(404).json({ error: 'zone not found' });
+    const b = req.body || {};
+    const sets = []; const args = [];
+    for (const k of ['x', 'y', 'w', 'h']) if (b[k] !== undefined) {
+      if (b[k] !== null && !Number.isFinite(+b[k])) return res.status(400).json({ error: `${k} 需为数值或 null` });
+      if ((k === 'w' || k === 'h') && b[k] !== null && +b[k] < 40) return res.status(400).json({ error: `${k} 不得小于 40` });
+      sets.push(`${k}=?`); args.push(b[k] === null ? null : +b[k]);
+    }
+    if (b.collapsed !== undefined) { sets.push('collapsed=?'); args.push(b.collapsed ? 1 : 0); }
+    if (!sets.length) return res.status(400).json({ error: '至少提供 x/y/w/h/collapsed 之一' });
+    const now = Math.floor(Date.now() / 1000);
+    sets.push('updated_by=?', 'updated_at=?'); args.push(String(operator), now);
+    await db.prepare(`UPDATE topology_zone SET ${sets.join(',')} WHERE zone_id=?`).run(...args, zid);
+    const zone = await db.prepare(`SELECT ${ZONE_COLS} FROM topology_zone WHERE zone_id=?`).get(zid);
+    res.json({ ok: true, zone });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// 删除区域：成员设备转未分区（清 zone_id，不动坐标）；有子区域需先处理
+app.delete('/api/topology/zones/:id', requireRole('admin'), async (req, res) => {
+  try {
+    const operator = sessionOperator(req, req.body?.operator);
+    const zid = +req.params.id;
+    const z = await db.prepare('SELECT zone_id, name FROM topology_zone WHERE zone_id=?').get(zid);
+    if (!z) return res.status(404).json({ error: 'zone not found' });
+    const kids = await db.prepare('SELECT COUNT(*) AS c FROM topology_zone WHERE parent_zone_id=?').get(zid);
+    if (kids && kids.c > 0) return res.status(409).json({ error: `该区域有 ${kids.c} 个子区域，请先删除或改挂子区域` });
+    const r1 = await db.prepare('UPDATE topology_layout SET zone_id=NULL WHERE zone_id=?').run(zid);
+    const r2 = await db.prepare('DELETE FROM topology_zone WHERE zone_id=?').run(zid);
+    console.log(`[zone] deleted #${zid} "${z.name}" by ${operator}: members detached=${r1.changes}`);
+    res.json({ ok: true, detached: r1.changes });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// 设备入区/移区（placement 改写；坐标缺省补 null，前端渲染时给网格位）
+app.post('/api/topology/zones/:id/members', requireRole('admin'), async (req, res) => {
+  try {
+    const operator = sessionOperator(req, req.body?.operator);
+    const zid = +req.params.id;
+    const z = await db.prepare('SELECT zone_id, name FROM topology_zone WHERE zone_id=?').get(zid);
+    if (!z) return res.status(404).json({ error: 'zone not found' });
+    const ids = Array.isArray(req.body?.node_ids) ? req.body.node_ids.map(Number) : null;
+    if (!ids || !ids.length) return res.status(400).json({ error: 'node_ids 数组必填' });
+    if (ids.length > 500) return res.status(400).json({ error: '单批最多 500 个节点' });
+    const now = Math.floor(Date.now() / 1000);
+    let moved = 0, missing = [];
+    for (const nid of ids) {
+      if (!Number.isFinite(nid)) return res.status(400).json({ error: `node_id 非法：${nid}` });
+      const n = await db.prepare('SELECT node_id FROM topology_node WHERE node_id=?').get(nid);
+      if (!n) { missing.push(nid); continue; }
+      const row = await db.prepare('SELECT node_id FROM topology_layout WHERE node_id=?').get(nid);
+      if (row) await db.prepare('UPDATE topology_layout SET zone_id=?, updated_by=?, updated_at=? WHERE node_id=?').run(zid, String(operator), now, nid);
+      else await db.prepare('INSERT INTO topology_layout(node_id, group_key, x, y, layout_source, `position_locked`, zone_id, updated_by, updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(nid, null, null, null, 'auto', 0, zid, String(operator), now);
+      moved++;
+    }
+    res.json({ ok: true, moved, missing });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
