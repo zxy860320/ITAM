@@ -95,7 +95,7 @@ export default function TopologyPageV2(_: any) {
       try {
         const snap = await loadLayout();
         const clsLinks = links.map(l => ({ a: l.a, b: l.b }));
-        if (snap.nodes.size === 0) {
+        if (snap.nodes.size === 0 && snap.nodeZoneOf.size === 0) {
           // 首次：全量自动布局（zone 隶属一律 null——空画布没有任何自动区域，红线）
           const res = autoLayout(nodes, clsLinks, new Map());
           posRef.current = new Map(res.placed.map(p => [p.node_id, { x: p.x, y: p.y, source: 'auto', locked: false, group: p.group, zone: null }]));

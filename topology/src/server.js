@@ -417,7 +417,9 @@ app.get('/api/topology/layout', async (req, res) => {
     const nodes = await db.prepare('SELECT node_id, group_key, zone_id, x, y, layout_source, `position_locked`, updated_by, updated_at FROM topology_layout').all();
     // V2 读路径切 zone：zones 为新权威；groups 为兼容 shim（保留一个版本）。
     // zone 表为空且旧 topology_group 有数据（生产未跑迁移脚本的过渡态）→ shim 直接回退读旧表
-    const zones = await db.prepare('SELECT zone_id, name, bg_color, border_color, border_style, border_width, parent_zone_id, note, collapsed, x, y, w, h, sort_hint FROM topology_zone ORDER BY sort_hint ASC, zone_id ASC').all();
+    const zones = await db.prepare(`SELECT zone_id, name, bg_color, border_color, border_style, border_width, parent_zone_id, note, collapsed, x, y, w, h, sort_hint,
+      (SELECT COUNT(*) FROM topology_layout l WHERE l.zone_id = topology_zone.zone_id) AS member_count
+      FROM topology_zone ORDER BY sort_hint ASC, zone_id ASC`).all();
     let groups;
     if (zones.length) {
       groups = zones.map(z => ({
