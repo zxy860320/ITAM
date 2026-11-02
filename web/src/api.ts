@@ -37,6 +37,14 @@ export const api = {
   adConfig: () => get('/auth/ad-config'),
   adConfigSave: (body: any) => post('/auth/ad-config/save', body),
   adConfigTest: (body: any = {}) => post('/auth/ad-config/test', body),
+  // 工单（个人工作台）：录入→邮件给确认人→确认→结束；确认端点免登录（token 承载能力）
+  tickets: (qs: Record<string, any> = {}) =>
+    get('/tickets?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),
+  ticketCreate: (body: any) => post('/tickets/create', body),
+  ticketResend: (id: string) => post('/tickets/resend', { id }),
+  ticketCancel: (id: string) => post('/tickets/cancel', { id }),
+  ticketConfirmInfo: (token: string) => get('/ticket-confirm/info?token=' + encodeURIComponent(token)),
+  ticketConfirm: (token: string) => post('/ticket-confirm', { token }),
   summary: () => get('/summary'),  dashboard: () => get('/dashboard'),
   entities: (qs: Record<string, any>) =>
     get('/entities?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),

@@ -18,6 +18,8 @@ import AssetPage from './pages/AssetPage';
 import AssistantPage from './pages/AssistantPage';
 import SystemPage from './pages/SystemPage';
 import UsersPage from './pages/UsersPage';
+import TicketPage from './pages/TicketPage';
+import TicketConfirmPage from './pages/TicketConfirmPage';
 import LoginPage from './pages/LoginPage';
 
 const NAV = [
@@ -31,6 +33,9 @@ const NAV = [
     { key: 'link-review', label: '链路审核', hash: '#/link-review', color: 'var(--dom-network)' },
     { key: 'flow-path', label: '流量路径走势', hash: '#/flow-path', color: 'var(--dom-network)' },
     { key: 'service',   label: '服务监控', hash: '#/service',   color: 'var(--dom-service)' },
+  ]},
+  { group: '工作台', items: [
+    { key: 'tickets', label: '工单工作台', hash: '#/tickets', color: 'var(--sev-warning)' },
   ]},
   { group: '平台管理', items: [
     { key: 'assets', label: '资产管理', hash: '#/assets', color: '#8b5cf6' },
@@ -61,6 +66,7 @@ const PAGES: Record<string, [React.FC<any>, string]> = {
   assistant: [AssistantPage, 'AI 助手'],
   system: [SystemPage, '系统管理'],
   users: [UsersPage, '用户管理'],
+  tickets: [TicketPage, '工单工作台'],
 };
 
 function useHashRoute() {
@@ -104,6 +110,9 @@ export default function App() {
 
   // 大屏模式：无侧栏，流式铺满视口、自适应任意屏幕尺寸（免登录）
   if (route === 'dashboard') return <Dashboard />;
+
+  // 工单确认页：邮件收件人免登录（token 承载一次性确认能力）
+  if (route === 'ticket-confirm') return <TicketConfirmPage hash={hash} />;
 
   // 其余页面：未登录先过登录页
   if (auth === undefined) return <div className="login-wrap"><div className="login-card" style={{ textAlign: 'center', color: 'var(--text-3)' }}>正在检查登录状态…</div></div>;

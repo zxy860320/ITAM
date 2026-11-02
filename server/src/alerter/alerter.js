@@ -11,6 +11,8 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import net from 'net';
+import dnsPromises from 'dns/promises';
 import nodemailer from 'nodemailer';
 
 export const SEV_LABEL = { info: '信息', warning: '警告', severe: '严重', critical: '灾难' };
@@ -214,12 +216,24 @@ export class Notifier {
     return http(this._signUrl(ch), this._payload(ch, msg));
   }
 
-  _transport(ch) {
-    const key = `${ch.id}|${ch.smtp.host}|${ch.smtp.port}|${ch.smtp.user}`;
+  async _transport(ch) {
+    // nodemailer 10.x 连接前走 dns.resolve4/6，本机环境该路径会超时（系统解析却正常）。
+    // 对策：先用系统解析器（dns.lookup，走 hosts/系统缓存）把域名换成 IP，
+    // nodemailer 对 IP 型 host 跳过自身 DNS；servername 仍带原域名（TLS SNI）。
+    let host = ch.smtp.host;
+    let servername;
+    if (!net.isIP(host)) {
+      try {
+        const recs = await dnsPromises.lookup(host, { all: true });
+        if (recs.length) { host = recs[0].address; servername = ch.smtp.host; }
+      } catch { /* 系统解析失败→原样交给 nodemailer 自行处理 */ }
+    }
+    const key = `${ch.id}|${host}|${ch.smtp.port}|${ch.smtp.user}`;
     let t = this._transports.get(key);
     if (!t) {
       t = nodemailer.createTransport({
-        host: ch.smtp.host, port: ch.smtp.port, secure: !!ch.smtp.secure,
+        host, port: ch.smtp.port, secure: !!ch.smtp.secure,
+        ...(servername ? { servername } : {}),
         auth: { user: ch.smtp.user, pass: ch.smtp.pass },
         connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000,
       });
@@ -230,13 +244,26 @@ export class Notifier {
 
   async _sendEmail(ch, msg) {
     if (!ch.smtp?.host || !ch.to?.length) throw new Error('未配置 SMTP 或收件人');
-    await this._transport(ch).sendMail({
+    await (await this._transport(ch)).sendMail({
       from: ch.smtp.from || ch.smtp.user,
       to: ch.to.join(','),
       subject: msg.title,
       text: msg.text,
     });
     return { ok: true };
+  }
+
+  /**
+   * 一次性业务邮件（工单确认等，非告警差分流程）：取第一个启用的 email 通道直发。
+   * 不依赖全局 enabled（告警关了工单邮件照发）；发送失败抛错由调用方如实落账。
+   */
+  async sendBusinessMail(to, subject, text, html) {
+    const ch = this.cfg.channels.find(c => c.type === 'email' && c.enabled && c.smtp?.host);
+    if (!ch) throw new Error('未配置可用的邮件通道：请到「告警出口」添加并启用 SMTP 邮件通道');
+    await (await this._transport(ch)).sendMail({
+      from: ch.smtp.from || ch.smtp.user, to, subject, text, html,
+    });
+    return { channel: ch.label, from: ch.smtp.from || ch.smtp.user };
   }
 
   _logIt(ch, kind, n, ok, err) {

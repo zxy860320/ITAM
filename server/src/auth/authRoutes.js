@@ -172,6 +172,9 @@ export function mountAuth(app, store) {
   app.use((req, res, next) => {
     if (!req.path.startsWith('/api')) return next();               // 非 API（探活等）放行
     if (req.path.startsWith('/api/auth/')) return next();          // 登录/登出/me 自身已处理
+    // 工单确认端点免登录：确认人是外部邮件收件人，未必有平台账号；
+    // 能力由 48 字节一次性 token 承载（确认/取消后即作废），端点内自校验。
+    if (req.path.startsWith('/api/ticket-confirm')) return next();
     if (req.method === 'GET' && ANON_GET.has(req.path)) return next(); // 大屏免登录（只读聚合）
     if (!req.auth) return res.status(401).json({ error: 'not_logged_in' });
     next();

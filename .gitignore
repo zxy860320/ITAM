@@ -32,6 +32,8 @@ server/data/roles.json
 server/data/sessions.json
 server/data/ad_config.json
 server/data/auth_audit.jsonl
+# 工单数据（含确认人个人信息与一次性 token）——运行时数据，不入库
+server/data/tickets.json
 # LangGraph agent 本地虚拟环境与 checkpoint（会话记忆，运行时数据）
 agent/.venv/
 agent/data/

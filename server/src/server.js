@@ -13,6 +13,8 @@ import { AssetStore } from './assets/assetStore.js';
 import { mountAssets } from './assets/assetRoutes.js';
 import { UserStore } from './auth/userStore.js';
 import { mountAuth, requirePerm } from './auth/authRoutes.js';
+import { TicketStore } from './tickets/ticketStore.js';
+import { mountTickets } from './tickets/ticketRoutes.js';
 
 const PORT = process.env.PORT || 8787;
 // 数据源开关：mock | zabbix（真实 Zabbix JSON-RPC 2.0）
@@ -80,6 +82,11 @@ const canAck = requirePerm(userStore, 'event.ack');
 const canAssetWrite = requirePerm(userStore, 'asset.write');
 const canOpsExec = requirePerm(userStore, 'ops.exec');
 const canPlatformCfg = requirePerm(userStore, 'platform.config');
+
+// ---------- 工单（个人工作台）：录入→邮件给确认人→确认→结束 ----------
+// 邮件复用告警出口 SMTP 通道；确认链接域名优先 notify.json 的 consoleUrl。
+const ticketStore = new TicketStore(DATA_DIR_EARLY);
+mountTickets(app, { store: ticketStore, notifier, userStore, consoleUrlOf: () => notifier.cfg.consoleUrl });
 
 const guard = (req, res, next) => {
   if (!collector.dataset) return res.status(503).json({ error: 'collector syncing, retry' });
