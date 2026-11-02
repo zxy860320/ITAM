@@ -17,6 +17,8 @@ import OpsPage from './pages/OpsPage';
 import AssetPage from './pages/AssetPage';
 import AssistantPage from './pages/AssistantPage';
 import SystemPage from './pages/SystemPage';
+import UsersPage from './pages/UsersPage';
+import LoginPage from './pages/LoginPage';
 
 const NAV = [
   { group: '监控视图', items: [
@@ -37,6 +39,7 @@ const NAV = [
     { key: 'ops', label: '设备操作', hash: '#/ops', color: 'var(--dom-service)' },
     { key: 'assistant', label: 'AI 助手', hash: '#/assistant', color: 'var(--dom-wlan)' },
     { key: 'system', label: '系统管理', hash: '#/system' },
+    { key: 'users', label: '用户管理', hash: '#/users', perm: 'user.manage' },
   ]},
 ];
 
@@ -57,6 +60,7 @@ const PAGES: Record<string, [React.FC<any>, string]> = {
   assets: [AssetPage, '资产管理'],
   assistant: [AssistantPage, 'AI 助手'],
   system: [SystemPage, '系统管理'],
+  users: [UsersPage, '用户管理'],
 };
 
 function useHashRoute() {
@@ -82,10 +86,35 @@ export default function App() {
   const [navCollapsed, setNavCollapsed] = React.useState(() => localStorage.getItem('uocp.nav.collapsed') === '1');
   const toggleNav = () => setNavCollapsed(v => { localStorage.setItem('uocp.nav.collapsed', v ? '0' : '1'); return !v; });
 
-  // 大屏模式：无侧栏，流式铺满视口、自适应任意屏幕尺寸
+  // ---------- 登录门禁（除大屏外全站需登录）：UI 门禁 + 顶栏用户区 ----------
+  const [auth, setAuth] = React.useState<any | null | undefined>(undefined); // undefined=检查中，null=未登录
+  const [userMenu, setUserMenu] = React.useState(false);
+  React.useEffect(() => { api.me().then(setAuth).catch(() => setAuth(null)); }, []);
+  const doLogout = async () => {
+    try { await api.logout(); } catch { /* 会话可能已失效 */ }
+    setAuth(null); setUserMenu(false);
+  };
+  const changePassword = async () => {
+    const pw = window.prompt('输入新密码（至少 6 位）：');
+    if (pw == null) return;
+    try { await api.changePassword(pw); alert('密码已修改'); }
+    catch (e: any) { alert(`修改失败：${e.message}`); }
+    setUserMenu(false);
+  };
+
+  // 大屏模式：无侧栏，流式铺满视口、自适应任意屏幕尺寸（免登录）
   if (route === 'dashboard') return <Dashboard />;
 
+  // 其余页面：未登录先过登录页
+  if (auth === undefined) return <div className="login-wrap"><div className="login-card" style={{ textAlign: 'center', color: 'var(--text-3)' }}>正在检查登录状态…</div></div>;
+  if (auth === null) return <LoginPage onLoggedIn={who => setAuth(who)} />;
+
   const [Page, title] = PAGES[route] || PAGES.dashboard;
+  const perms: string[] = auth.perms || [];
+  const visibleNav = NAV.map(g => ({
+    ...g,
+    items: g.items.filter(it => !('perm' in (it as any)) || perms.includes((it as any).perm)),
+  })).filter(g => g.items.length);
 
   return (
     <div className="app-shell">
@@ -95,14 +124,14 @@ export default function App() {
             <div className="brand-name">IT运维监控平台</div>
             <div className="brand-sub">ZABBIX 7.2 · OPS CONSOLE</div>
           </div>
-          {NAV.map(g => (
+          {visibleNav.map(g => (
             <div key={g.group}>
               <div className="nav-group-label">{g.group}</div>
               {g.items.map(it => (
                 <a key={it.key} className={`nav-item ${route === it.key ? 'active' : ''}`} href={it.hash}>
                   {it.color && <i className="dom-dot" style={{ background: it.color }} />}
                   {it.label}
-                  {sum && it.key !== 'source' && it.key !== 'system' && it.key !== 'notify' && it.key !== 'dashboard' && (() => {
+                  {sum && it.key !== 'source' && it.key !== 'system' && it.key !== 'notify' && it.key !== 'dashboard' && it.key !== 'users' && (() => {
                     const d = sum.domains.find((x: any) => x.domain === it.key);
                     const n = d ? d.critical + d.warning : 0;
                     return n > 0 ? <span className="nav-badge">{n}</span> : null;
@@ -129,9 +158,20 @@ export default function App() {
             </span>
           )}
           <span className="clock">{now.getFullYear()}-{p(now.getMonth() + 1)}-{p(now.getDate())} {p(now.getHours())}:{p(now.getMinutes())}:{p(now.getSeconds())}</span>
+          <div className="user-chip">
+            <span>{auth.user?.displayName || auth.user?.username}</span>
+            <span className="urole">{auth.role?.label || auth.user?.role}{auth.user?.source === 'ad' ? ' · AD' : ''}</span>
+            <button className="btn" style={{ padding: '4px 8px' }} onClick={() => setUserMenu(v => !v)}>▾</button>
+            {userMenu && (
+              <div className="user-menu">
+                {auth.user?.source === 'local' && <button onClick={changePassword}>修改密码</button>}
+                <button onClick={doLogout}>退出登录</button>
+              </div>
+            )}
+          </div>
         </header>
         <div className="page-scroll">
-          <Page summary={sum} />
+          <Page summary={sum} auth={auth} />
         </div>
       </div>
     </div>

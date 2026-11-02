@@ -40,6 +40,9 @@ services:
       # 前端 /api/agent/* 由 server 代理到这里——容器网络里必须用服务名，
       # 默认 127.0.0.1:8791 只适用于与 agent 同机裸跑（本地开发）的场景
       AGENT_URL: ${AGENT_URL:-http://agent:8791}
+      # 首次启动种子管理员口令（留空=随机生成并打印到容器日志）；反代 https 时置 1
+      ITYW_ADMIN_PASS: ${ITYW_ADMIN_PASS:-}
+      ITYW_COOKIE_SECURE: ${ITYW_COOKIE_SECURE:-}
     volumes:
       # source.json / notify.json / notify_state.json / dbmp_samples.json / ai_audit.jsonl 持久化
       - ./server/data:/app/server/data
@@ -65,9 +68,14 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-ityw_topology}
       ZBX_SOURCE_CFG: /app/config/source.json
+      # 认证：只读共享 P0 会话/角色文件（登录门禁 + link.review/platform.config 细控）
+      UOCP_SESSIONS_FILE: /app/shared/sessions.json
+      UOCP_ROLES_FILE: /app/shared/roles.json
     volumes:
       # 只读复用 P0 的 Zabbix 凭据文件（topology-svc 从不写它）
       - ./server/data/source.json:/app/config/source.json:ro
+      # 只读共享认证数据（sessions/roles 由 server 进程写，这里只校验）
+      - ./server/data:/app/shared:ro
     # ports:
     #   - "127.0.0.1:8790:8790"
 

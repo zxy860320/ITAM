@@ -51,7 +51,7 @@ export function eventTrend(ds, hours = 24) {
   return buckets;
 }
 
-export function listFilter(qs, { domain, q, status, availability, severity }) {
+export function listFilter(qs, { domain, q, status, availability, severity, group }) {
   let out = qs;
   if (domain === 'network') out = out.filter(x => x.domain === 'network' && !x.wlan);
   else if (domain === 'wlan') out = out.filter(x => x.domain === 'network' && x.wlan);
@@ -59,7 +59,59 @@ export function listFilter(qs, { domain, q, status, availability, severity }) {
   if (q) out = out.filter(x => x.name.toLowerCase().includes(q.toLowerCase()) || (x.label || '').includes(q) || (x.ip || '').includes(q));
   if (status) out = out.filter(x => x.status === status);
   if (availability) out = out.filter(x => x.availability === availability);
+  // 群组过滤：实体 group 字段可能是多群组 ' / ' 连接（Zabbix 主机组可多个），任一匹配即命中
+  if (group) out = out.filter(x => (x.group || '').split(' / ').includes(group));
   return out;
+}
+
+// 群组选项：从（未经 group 过滤的）实体集汇聚去重，供前端下拉
+export function groupOptions(rows) {
+  const set = new Set();
+  rows.forEach(x => (x.group || '').split(' / ').forEach(g => g && set.add(g)));
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+// ---------- 列表排序（白名单字段，防注入；服务端分页故排序必须在后端做） ----------
+const AVAIL_RANK = { critical: 0, warning: 1, healthy: 2 };
+const SORT_GET = Object.assign(Object.create(null), {
+  name: x => x.name || '',
+  ip: x => x.ip || '',
+  group: x => x.group || '',
+  availability: x => AVAIL_RANK[x.availability] ?? 3,
+  problems: x => x.problems ?? null,
+  noiseProblems: x => x.noiseProblems ?? null,
+  cpu: x => x.cpu ?? null,
+  mem: x => x.mem ?? null,
+  disk: x => x.disk ?? null,
+  uptimeDays: x => x.uptimeDays ?? null,
+  pingMs: x => x.pingMs ?? null,
+  temp: x => x.temp ?? null,
+  rt: x => x.rt ?? null,
+  qps: x => x.qps ?? x.dbMetrics?.qps ?? null,
+  successRate: x => x.successRate ?? null,
+  instances: x => x.instances ?? null,
+  conn: x => x.dbMetrics?.threads_connected ?? null,
+  threads: x => x.dbMetrics?.threads_running ?? null,
+  dbRole: x => x.dbRole || '',
+  version: x => x.version || '',
+  apTotal: x => x.apTotal ?? null,
+  wlanUsers: x => x.wlanUsers ?? null,
+});
+
+// sort 不在白名单内时不排序（返回原数组）；null/空值恒沉底（不随方向翻转）
+export function sortEntities(rows, sort, dir) {
+  const get = SORT_GET[sort];
+  if (!get) return rows;
+  const sign = dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const va = get(a), vb = get(b);
+    const na = va == null || va === '', nb = vb == null || vb === '';
+    if (na && nb) return String(a.name || '').localeCompare(String(b.name || ''));
+    if (na) return 1;
+    if (nb) return -1;
+    if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * sign;
+    return String(va).localeCompare(String(vb)) * sign;
+  });
 }
 
 export function paginate(arr, page = 1, size = 20) {

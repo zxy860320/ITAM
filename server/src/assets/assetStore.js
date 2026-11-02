@@ -106,7 +106,7 @@ export class AssetStore {
     return { total: this.assets.length, creds, byType, types: ASSET_TYPES };
   }
 
-  list({ type, q, page = 1, size = 20 } = {}) {
+  list({ type, q, sort, dir, page = 1, size = 20 } = {}) {
     let out = this.assets;
     if (type) out = out.filter(a => a.type === type);
     if (q) {
@@ -116,7 +116,28 @@ export class AssetStore {
         (a.model || '').toLowerCase().includes(s) || (a.owner || '').toLowerCase().includes(s) ||
         (a.sn || '').toLowerCase().includes(s) || (a.location || '').includes(s));
     }
-    out = [...out].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    // 排序白名单（空值恒沉底）；未传/非法 sort 时保持默认 updatedAt 倒序
+    const GET = Object.assign(Object.create(null), {
+      name: a => a.name || '', ip: a => a.ip || '', type: a => a.type || '',
+      model: a => a.model || '', os: a => a.os || '', location: a => a.location || '',
+      owner: a => a.owner || '', env: a => a.env || '', status: a => a.status || '',
+      credCount: a => (a.creds || []).length, createdAt: a => a.createdAt || 0, updatedAt: a => a.updatedAt || 0,
+    });
+    const get = GET[sort];
+    if (get) {
+      const sign = dir === 'asc' ? 1 : -1;
+      out = [...out].sort((a, b) => {
+        const va = get(a), vb = get(b);
+        const na = va == null || va === '', nb = vb == null || vb === '';
+        if (na && nb) return (b.updatedAt || 0) - (a.updatedAt || 0);
+        if (na) return 1;
+        if (nb) return -1;
+        if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * sign;
+        return String(va).localeCompare(String(vb)) * sign;
+      });
+    } else {
+      out = [...out].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    }
     const total = out.length;
     const p = Math.max(1, Number(page) || 1), sz = Math.min(200, Math.max(1, Number(size) || 20));
     return { rows: out.slice((p - 1) * sz, p * sz).map(a => this.#view(a, false)), total, page: p, size: sz };

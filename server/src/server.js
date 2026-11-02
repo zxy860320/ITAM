@@ -4,13 +4,15 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { ZabbixCollector } from './collector/zabbixClient.js';
 import { DbmpClient } from './collector/dbmpClient.js';
-import { summary, topProblems, eventTrend, listFilter, paginate, byDomain, DOMAIN_LABEL } from './collector/aggregate.js';
+import { summary, topProblems, eventTrend, listFilter, paginate, byDomain, DOMAIN_LABEL, sortEntities, groupOptions } from './collector/aggregate.js';
 import { GROUP_MAPPING } from './collector/mockData.js';
 import { Notifier } from './alerter/alerter.js';
 import { mountOps } from './ops/opsRoutes.js';
 import { mountMcp } from './ai/mcpServer.js';
 import { AssetStore } from './assets/assetStore.js';
 import { mountAssets } from './assets/assetRoutes.js';
+import { UserStore } from './auth/userStore.js';
+import { mountAuth, requirePerm } from './auth/authRoutes.js';
 
 const PORT = process.env.PORT || 8787;
 // 数据源开关：mock | zabbix（真实 Zabbix JSON-RPC 2.0）
@@ -69,6 +71,16 @@ const app = express();
 app.use(express.json());
 app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', '*'); next(); });
 
+// ---------- 认证（全站门禁）：先于一切业务路由挂载 ----------
+// 除大屏 GET /api/summary、/api/dashboard 外所有 /api 需登录；写接口再按角色 perms 细控。
+const DATA_DIR_EARLY = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
+const userStore = new UserStore(DATA_DIR_EARLY);
+mountAuth(app, userStore);
+const canAck = requirePerm(userStore, 'event.ack');
+const canAssetWrite = requirePerm(userStore, 'asset.write');
+const canOpsExec = requirePerm(userStore, 'ops.exec');
+const canPlatformCfg = requirePerm(userStore, 'platform.config');
+
 const guard = (req, res, next) => {
   if (!collector.dataset) return res.status(503).json({ error: 'collector syncing, retry' });
   next();
@@ -104,16 +116,26 @@ app.get('/api/dashboard', guard, (req, res) => {
   });
 });
 
-// ---------- 实体列表（主机/网络/数据库/服务 通用） ----------
+// ---------- 实体列表（主机/网络/数据库/服务 通用；支持 sort/dir/group 参数） ----------
 app.get('/api/entities', guard, (req, res) => {
   const ds = mergedData();
   const all = [...ds.hosts, ...ds.services];
-  const filtered = listFilter(all, req.query);
-  const sorted = filtered.sort((a, b) => {
-    const rank = x => x.availability === 'critical' ? 0 : x.availability === 'warning' ? 1 : 2;
-    return rank(a) - rank(b) || (b.problems - a.problems) || a.name.localeCompare(b.name);
-  });
-  res.json(paginate(sorted, Number(req.query.page || 1), Number(req.query.size || 20)));
+  // 群组选项基于 domain 过滤后的全集（不含 group 自身过滤），保证下拉稳定
+  const scoped = listFilter(all, { ...req.query, group: undefined });
+  const filtered = req.query.group ? listFilter(scoped, req.query) : scoped;
+  const { sort, dir } = req.query;
+  let sorted;
+  if (sort) {
+    sorted = sortEntities(filtered, sort, dir);
+  } else {
+    // 默认：严重度优先 → 活动问题数 → 名称
+    sorted = [...filtered].sort((a, b) => {
+      const rank = x => x.availability === 'critical' ? 0 : x.availability === 'warning' ? 1 : 2;
+      return rank(a) - rank(b) || (b.problems - a.problems) || a.name.localeCompare(b.name);
+    });
+  }
+  const page = paginate(sorted, Number(req.query.page || 1), Number(req.query.size || 20));
+  res.json({ ...page, groups: groupOptions(scoped) });
 });
 
 // ---------- 单实体详情 + 时序 ----------
@@ -260,25 +282,25 @@ app.get('/api/events', guard, (req, res) => {
   res.json(paginate(evs.sort((a, b) => b.clock - a.clock), Number(req.query.page || 1), Number(req.query.size || 20)));
 });
 
-app.post('/api/events/:id/ack', guard, (req, res) => {
+app.post('/api/events/:id/ack', guard, canAck, (req, res) => {
   const ev = collector.data.events.find(e => e.eventid === req.params.id);
   if (!ev) return res.status(404).json({ error: 'not found' });
   ev.status = 'acked';
-  ev.ackBy = req.body?.user || 'operator';
+  ev.ackBy = req.auth?.user?.displayName || req.auth?.user?.username || 'operator';
   res.json({ ok: true, event: ev });
 });
 
 // ---------- 告警出口（钉钉/飞书/企业微信/邮件） ----------
 app.get('/api/notify', (req, res) => res.json(notifier.publicView()));
 
-app.post('/api/notify/save', (req, res) => {
+app.post('/api/notify/save', canPlatformCfg, (req, res) => {
   try {
     notifier.saveConfig(req.body || {});
     res.json({ ok: true, channels: notifier.cfg.channels.length, enabled: notifier.cfg.enabled });
   } catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
-app.post('/api/notify/test', async (req, res) => {
+app.post('/api/notify/test', canPlatformCfg, async (req, res) => {
   try {
     const r = await notifier.testChannel(String(req.body?.id || ''));
     res.json(r);
@@ -306,7 +328,7 @@ app.get('/api/source', (req, res) => {
   });
 });
 
-app.post('/api/source/test', async (req, res) => {
+app.post('/api/source/test', canPlatformCfg, async (req, res) => {
   const t0 = Date.now();
   const r = await collector.sync();
   const dr = await dbmp.sync().catch(e => ({ ok: false, error: String(e.message || e) }));
@@ -316,7 +338,7 @@ app.post('/api/source/test', async (req, res) => {
   } : null, dbmp: { ...dr, instances: dbmp.entities.length, counts: dbmp.counts } });
 });
 
-app.post('/api/source/save', (req, res) => {
+app.post('/api/source/save', canPlatformCfg, (req, res) => {
   const { mode, endpoint, token, freq, dbmp: dbmpCfg } = req.body || {};
   if (mode) collector.mode = DS.mode = mode === 'zabbix' ? 'zabbix' : 'mock';
   if (endpoint) collector.endpoint = DS.endpoint = endpoint;
@@ -331,12 +353,17 @@ app.post('/api/source/save', (req, res) => {
 });
 
 // ---------- 设备操作（经跳板机 JumpServer MCP：配置备份/只读巡检） ----------
+// 权限：exec/backup 需 ops.exec；config save/test 需 platform.config（GET config 登录即可，token 只回掩码）
+app.use('/api/ops/exec', canOpsExec);
+app.use('/api/ops/backup', canOpsExec);
+app.use('/api/ops/config/save', canPlatformCfg);
+app.use('/api/ops/config/test', canPlatformCfg);
 const opsHandle = mountOps(app, { notifier });
 
 // ---------- 资产管理（台账 + 加密凭据；数据 data/assets.json，密钥 data/cred.key 或 ITYW_CRED_KEY） ----------
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
 const assetStore = new AssetStore(DATA_DIR);
-mountAssets(app, { store: assetStore, mergedData });
+mountAssets(app, { store: assetStore, mergedData, canWrite: canAssetWrite });
 
 // ---------- AI 工具层（MCP Streamable HTTP，供 Open WebUI 等客户端调用） ----------
 mountMcp(app, { collector, dbmp, ops: opsHandle, assets: assetStore });
@@ -386,24 +413,29 @@ app.post('/api/agent/chat', (req, res) => proxyAgent(req, res, '/chat'));
 app.post('/api/agent/reset', (req, res) => proxyAgent(req, res, '/reset'));
 app.get('/api/agent/health', (req, res) => proxyAgent(req, res, '/health'));
 
-// ---------- 系统管理 ----------
+// ---------- 系统管理（角色数据来自真实 userStore；审计日志=认证审计+资产审计内存尾） ----------
 app.get('/api/system', (req, res) => {
   res.json({
-    roles: [
-      { role: 'admin',    label: '管理员',   perms: ['查看', '确认告警', '配置监控源', '用户管理'] },
-      { role: 'operator', label: '运维员',   perms: ['查看', '确认告警', '重启服务(模拟)'] },
-      { role: 'viewer',   label: '只读用户', perms: ['查看'] },
-      { role: 'auditor',  label: '审计员',   perms: ['查看', '导出审计日志'] },
-    ],
-    auditLog: [
-      { at: Date.now() - 3600e3 * 1.2, user: '张伟(admin)',    action: '确认告警 EVT-300004' },
-      { at: Date.now() - 3600e3 * 2.5, user: '李娜(admin)',    action: '修改采集频率 120s→60s' },
-      { at: Date.now() - 3600e3 * 5.0, user: 'system',         action: '群组映射同步完成（5 条）' },
-      { at: Date.now() - 3600e3 * 8.2, user: '王强(operator)', action: '重启服务 svc-19-短信通道（模拟）' },
-      { at: Date.now() - 3600e3 * 26,  user: '李娜(admin)',    action: '新增监控源 zbx-prod-01' },
-    ],
+    roles: userStore.roles.map(r => ({ role: r.id, label: r.label, builtin: r.builtin, perms: r.perms })),
+    users: { total: userStore.users.length, local: userStore.users.filter(u => u.source === 'local').length, ad: userStore.users.filter(u => u.source === 'ad').length },
+    ad: { enabled: userStore.adConfig.enabled, url: userStore.adConfig.url || '(未配置)' },
+    auditLog: readAuditTail(),
   });
 });
+// 合并最近认证/资产审计（各取尾部若干条，按时间倒序）
+function readAuditTail() {
+  const tail = (file, n) => {
+    try {
+      const lines = fs.readFileSync(file, 'utf-8').split('\n').filter(Boolean);
+      return lines.slice(-n).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    } catch { return []; }
+  };
+  const auth = tail(path.join(DATA_DIR_EARLY, 'auth_audit.jsonl'), 15)
+    .map(r => ({ at: r.at, user: `${r.by || r.user}(${r.role || ''})`, action: r.action }));
+  const asset = tail(path.join(DATA_DIR_EARLY, 'asset_audit.jsonl'), 10)
+    .map(r => ({ at: r.at, user: `${r.by || 'ui'}`, action: `资产:${r.action} ${r.asset || ''}` }));
+  return [...auth, ...asset].sort((a, b) => b.at - a.at).slice(0, 20);
+}
 
 // ---------- 启动 ----------
 async function main() {

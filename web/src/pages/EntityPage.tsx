@@ -8,6 +8,9 @@ import DbDetailDrawer from './DbDetailDrawer';
 export default function EntityPage({ domain, summary }: { domain: string; summary: any }) {
   const [q, setQ] = React.useState('');
   const [avail, setAvail] = React.useState('');
+  const [group, setGroup] = React.useState('');
+  const [sort, setSort] = React.useState('');   // 排序字段（后端白名单）
+  const [dir, setDir] = React.useState('desc'); // asc | desc
   const [page, setPage] = React.useState(1);
   const [detail, setDetail] = React.useState<any>(null);
   // 行内一键配置备份（network/wlan 域）：busy 按设备 IP 记状态，meta 缓存各设备最近备份时间
@@ -17,7 +20,7 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
   const [bkMeta, setBkMeta] = React.useState<Record<string, any> | null>(null);
   const [bkTick, setBkTick] = React.useState(0);
 
-  const qs = { domain, q, availability: avail, page, size: 20 };
+  const qs = { domain, q, availability: avail, group, sort, dir: sort ? dir : '', page, size: 20 };
   const { data, reload } = usePoll(() => api.entities(qs), 20000, JSON.stringify(qs));
   const { data: evs } = usePoll(() => api.events({ domain, size: 8 }), 20000, domain);
   React.useEffect(() => {
@@ -61,6 +64,15 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
 
   const stats = summary?.domains?.find((d: any) => d.domain === domain);
 
+  // 表头点击：降序→升序→清除 三态循环（后端排序，跨页生效）
+  function clickSort(key: string) {
+    const sk = key === 'ap' ? 'apTotal' : key;
+    if (sort !== sk) { setSort(sk); setDir('desc'); }
+    else if (dir === 'desc') setDir('asc');
+    else { setSort(''); setDir('desc'); }
+    setPage(1);
+  }
+
   return (
     <div>
       {/* KPI */}
@@ -88,18 +100,33 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
         <div className="card" style={{ padding: '12px 14px' }}>
           <div className="toolbar" style={{ marginBottom: 10 }}>
             <input placeholder="搜索名称 / IP…" value={q} onChange={e => { setQ(e.target.value); setPage(1); }} />
+            {!!data?.groups?.length && (
+              <select value={group} onChange={e => { setGroup(e.target.value); setPage(1); }}>
+                <option value="">全部群组</option>
+                {data.groups.map((g: string) => <option key={g} value={g}>{g}</option>)}
+              </select>
+            )}
             <div className="seg">
               {[['', '全部'], ['critical', '异常'], ['warning', '警告'], ['healthy', '健康']].map(([v, l]) => (
                 <button key={v} className={avail === v ? 'on' : ''} onClick={() => { setAvail(v); setPage(1); }}>{l}</button>
               ))}
             </div>
             <span className="spacer" style={{ flex: 1 }} />
+            {sort && <button className="btn" title="清除排序" onClick={() => { setSort(''); setDir('desc'); setPage(1); }}>清除排序</button>}
             <button className="btn" onClick={reload}>刷新</button>
           </div>
           <table className="data fixed nowrap">
             <Colgroup cols={buildCols(domain, data?.rows || [], canBackup)} />
             <thead>
-              <tr>{buildCols(domain, data?.rows || [], canBackup).map(c => <th key={c.key} className={c.cls}>{c.th}</th>)}</tr>
+              <tr>{buildCols(domain, data?.rows || [], canBackup).map(c => SORTABLE.has(c.key) ? (
+                <th key={c.key} className={c.cls} onClick={() => clickSort(c.key)}
+                  style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                  title="点击切换 降序 / 升序 / 默认排序">
+                  {c.th}{sort === (c.key === 'ap' ? 'apTotal' : c.key)
+                    ? <span style={{ color: 'var(--text-1)', marginLeft: 3 }}>{dir === 'desc' ? '▾' : '▴'}</span>
+                    : <span style={{ color: 'var(--text-3)', opacity: 0.45, marginLeft: 3, fontSize: 10 }}>⇅</span>}
+                </th>
+              ) : <th key={c.key} className={c.cls}>{c.th}</th>)}</tr>
             </thead>
             <tbody>
               {(data?.rows || []).map((r: any) => (
@@ -142,6 +169,9 @@ export default function EntityPage({ domain, summary }: { domain: string; summar
 
 /* ---------- 列定义：按当页实际数据裁剪空列，百分比列宽自适应卡片宽度 ---------- */
 type Col = { key: string; th: string; w?: string; cls?: string };
+
+// 可点击排序的列（与后端 SORT_GET 白名单对应；ap 列映射 apTotal）
+const SORTABLE = new Set(['name', 'ip', 'group', 'rt', 'qps', 'successRate', 'instances', 'dbRole', 'version', 'conn', 'threads', 'ap', 'wlanUsers', 'cpu', 'mem', 'disk', 'problems', 'availability']);
 
 function buildCols(domain: string, rows: any[], canBackup = false): Col[] {
   const any = (f: (r: any) => any) => rows.some(f);

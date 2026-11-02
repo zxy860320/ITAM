@@ -1,10 +1,11 @@
 // 资产管理 API：台账 CRUD + 凭据（加密存储）。
 // 红线：所有响应永不含密码（enc 或明文）；明文仅 /cred/reveal 且必审计。
-export function mountAssets(app, { store, mergedData }) {
+// 权限：写路由挂 canWrite（perm=asset.write，由 server.js 注入）。
+export function mountAssets(app, { store, mergedData, canWrite }) {
   app.get('/api/assets/stats', (req, res) => res.json(store.stats()));
 
   app.get('/api/assets', (req, res) => {
-    res.json(store.list({ type: req.query.type, q: req.query.q, page: req.query.page, size: req.query.size }));
+    res.json(store.list({ type: req.query.type, q: req.query.q, sort: req.query.sort, dir: req.query.dir, page: req.query.page, size: req.query.size }));
   });
 
   app.get('/api/assets/:id', (req, res) => {
@@ -13,19 +14,19 @@ export function mountAssets(app, { store, mergedData }) {
     res.json(v);
   });
 
-  app.post('/api/assets/save', (req, res) => {
+  app.post('/api/assets/save', canWrite, (req, res) => {
     const r = store.save(req.body || {});
     if (r.error) return res.status(400).json(r);
     res.json(r);
   });
 
-  app.post('/api/assets/delete', (req, res) => {
+  app.post('/api/assets/delete', canWrite, (req, res) => {
     const r = store.remove(req.body?.id);
     if (r.error) return res.status(400).json(r);
     res.json(r);
   });
 
-  app.post('/api/assets/cred/delete', (req, res) => {
+  app.post('/api/assets/cred/delete', canWrite, (req, res) => {
     const r = store.deleteCred(req.body?.assetId, req.body?.credId);
     if (r.error) return res.status(400).json(r);
     res.json(r);

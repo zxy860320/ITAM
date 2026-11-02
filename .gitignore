@@ -26,6 +26,12 @@ server/data/ai_audit.jsonl
 server/data/assets.json
 server/data/cred.key
 server/data/asset_audit.jsonl
+# 用户密码哈希 / 会话 token / 角色与 AD 配置 / 认证审计——严禁入库（仓库走 example 或运行时生成）
+server/data/users.json
+server/data/roles.json
+server/data/sessions.json
+server/data/ad_config.json
+server/data/auth_audit.jsonl
 # LangGraph agent 本地虚拟环境与 checkpoint（会话记忆，运行时数据）
 agent/.venv/
 agent/data/

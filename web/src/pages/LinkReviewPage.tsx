@@ -42,13 +42,15 @@ export default function LinkReviewPage(_: any) {
   const [band, setBand] = React.useState('');
   const [nodeId, setNodeId] = React.useState('');
   const [q, setQ] = React.useState(''); // 对端/设备/接口/快照证据搜索
+  const [sort, setSort] = React.useState(''); // 后端白名单：confidence/last_seen/missing_rounds/link_id/source/status
+  const [dir, setDir] = React.useState('desc');
   const [page, setPage] = React.useState(1);
   const size = 100;
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
   const [busy, setBusy] = React.useState('');
   const [msg, setMsg] = React.useState('');
 
-  const fkey = JSON.stringify({ status, band, nodeId, q, page });
+  const fkey = JSON.stringify({ status, band, nodeId, q, sort, dir, page });
   const { data, err, reload } = usePoll(() => {
     const qs: Record<string, any> = { status, page, size };
     if (band.startsWith('min:')) qs.min_confidence = band.slice(4);
@@ -56,6 +58,7 @@ export default function LinkReviewPage(_: any) {
     if (band.startsWith('range:')) { const [, lo, hi] = band.split(':'); qs.min_confidence = lo; qs.max_confidence = hi; }
     if (nodeId) qs.node_id = nodeId;
     if (q.trim()) qs.q = q.trim();
+    if (sort) { qs.sort = sort; qs.dir = dir; }
     return topoApi.pending(qs);
   }, 30000, fkey);
 
@@ -129,6 +132,22 @@ export default function LinkReviewPage(_: any) {
 
   const allPageSelected = rows.length > 0 && rows.every(r => selected.has(r.link_id));
 
+  // 表头点击：降序→升序→默认(置信降序) 三态循环
+  const clickSort = (key: string) => {
+    if (sort !== key) { setSort(key); setDir('desc'); }
+    else if (dir === 'desc') setDir('asc');
+    else { setSort(''); setDir('desc'); }
+    setPage(1); setSelected(new Set());
+  };
+  const Th = ({ k, children, style }: { k: string; children?: React.ReactNode; style?: React.CSSProperties }) => (
+    <th style={{ ...style, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }} onClick={() => clickSort(k)}
+      title="点击切换 降序 / 升序 / 默认排序">
+      {children}{sort === k
+        ? <span style={{ color: 'var(--text-1)', marginLeft: 3 }}>{dir === 'desc' ? '▾' : '▴'}</span>
+        : <span style={{ color: 'var(--text-3)', opacity: 0.45, marginLeft: 3, fontSize: 10 }}>⇅</span>}
+    </th>
+  );
+
   return (
     <div>
       {/* 汇总条 */}
@@ -198,12 +217,12 @@ export default function LinkReviewPage(_: any) {
           <thead>
             <tr>
               <th style={{ width: 34 }}><input type="checkbox" checked={allPageSelected} onChange={toggleAllPage} /></th>
-              <th style={{ width: 34 }}>ID</th>
+              <Th k="link_id" style={{ width: 48 }}>ID</Th>
               <th>本端（A，已解析）</th>
               <th>对端（B）</th>
-              <th style={{ width: 70 }}>置信</th>
-              <th style={{ width: 90 }}>状态</th>
-              <th style={{ width: 110 }}>最近发现</th>
+              <Th k="confidence" style={{ width: 82 }}>置信</Th>
+              <Th k="missing_rounds" style={{ width: 104 }}>状态</Th>
+              <Th k="last_seen" style={{ width: 122 }}>最近发现</Th>
               <th style={{ width: 130 }}>操作</th>
             </tr>
           </thead>

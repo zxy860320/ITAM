@@ -20,8 +20,23 @@ async function post<T = any>(path: string, body?: any): Promise<T> {
   }
   return r.json();
 }
-
 export const api = {
+  // 认证：全站门禁（大屏 /api/summary、/api/dashboard 匿名可读，其余需登录）
+  me: () => get('/auth/me'),
+  login: (username: string, password: string) => post('/auth/login', { username, password }),
+  logout: () => post('/auth/logout'),
+  changePassword: (newPassword: string) => post('/auth/change-password', { newPassword }),
+  users: () => get('/users'),
+  userCreate: (body: any) => post('/users/create', body),
+  userUpdate: (body: any) => post('/users/update', body),
+  userDelete: (id: string) => post('/users/delete', { id }),
+  userResetPass: (id: string, newPassword: string) => post('/users/reset-password', { id, newPassword }),
+  roleCreate: (body: any) => post('/roles/create', body),
+  roleUpdate: (body: any) => post('/roles/update', body),
+  roleDelete: (id: string) => post('/roles/delete', { id }),
+  adConfig: () => get('/auth/ad-config'),
+  adConfigSave: (body: any) => post('/auth/ad-config/save', body),
+  adConfigTest: (body: any = {}) => post('/auth/ad-config/test', body),
   summary: () => get('/summary'),  dashboard: () => get('/dashboard'),
   entities: (qs: Record<string, any>) =>
     get('/entities?' + new URLSearchParams(Object.entries(qs).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)]))),

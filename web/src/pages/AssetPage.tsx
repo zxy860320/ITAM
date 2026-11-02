@@ -31,6 +31,8 @@ export default function AssetPage() {
   const [type, setType] = React.useState('');
   const [q, setQ] = React.useState('');
   const [qDeb, setQDeb] = React.useState('');
+  const [sort, setSort] = React.useState('');   // 后端白名单：name/type/ip/model/location/owner/env/status/credCount/updatedAt/createdAt
+  const [dir, setDir] = React.useState('desc');
   const [err, setErr] = React.useState('');
   const [editing, setEditing] = React.useState<any>(null);   // 编辑弹窗（asset 对象或新建默认）
   const [credOf, setCredOf] = React.useState<any>(null);     // 凭据抽屉的资产（详情对象）
@@ -44,11 +46,27 @@ export default function AssetPage() {
   React.useEffect(() => { setPage(1); }, [type, qDeb]);
 
   const reload = React.useCallback(() => {
-    api.assets({ type, q: qDeb, page, size }).then(d => { setRows(d.rows || []); setTotal(d.total || 0); setErr(''); })
+    api.assets({ type, q: qDeb, sort, dir: sort ? dir : '', page, size }).then(d => { setRows(d.rows || []); setTotal(d.total || 0); setErr(''); })
       .catch(e => setErr(String(e.message || e)));
     api.assetsStats().then(setStats).catch(() => {});
-  }, [type, qDeb, page]);
+  }, [type, qDeb, sort, dir, page]);
   React.useEffect(() => { reload(); }, [reload]);
+
+  // 表头点击：降序→升序→清除 三态循环（后端排序，跨页生效）
+  function clickSort(key: string) {
+    if (sort !== key) { setSort(key); setDir('desc'); }
+    else if (dir === 'desc') setDir('asc');
+    else { setSort(''); setDir('desc'); }
+    setPage(1);
+  }
+  const Th = ({ k, children, cls }: { k: string; children: React.ReactNode; cls?: string }) => (
+    <th className={cls} onClick={() => clickSort(k)} style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+      title="点击切换 降序 / 升序 / 默认排序">
+      {children}{sort === k
+        ? <span style={{ color: 'var(--text-1)', marginLeft: 3 }}>{dir === 'desc' ? '▾' : '▴'}</span>
+        : <span style={{ color: 'var(--text-3)', opacity: 0.45, marginLeft: 3, fontSize: 10 }}>⇅</span>}
+    </th>
+  );
 
   async function del(id: string, name: string) {
     if (!window.confirm(`确认删除资产「${name}」？其下所有凭据一并删除。`)) return;
@@ -88,6 +106,7 @@ export default function AssetPage() {
         </div>
         <input placeholder="搜索 名称 / IP / 型号 / 负责人 / SN / 位置" value={q} onChange={e => setQ(e.target.value)} />
         <span className="spacer" style={{ flex: 1 }} />
+        {sort && <button className="btn" title="清除排序，恢复按更新时间" onClick={() => { setSort(''); setDir('desc'); setPage(1); }}>清除排序</button>}
         <button className="btn" onClick={doImport} disabled={importing}>{importing ? '导入中…' : '导入监控资产'}</button>
         <button className="btn" style={{ borderColor: 'var(--dom-network)', color: 'var(--dom-network)' }}
           onClick={() => setEditing({ name: '', type: type || 'server', ip: '', model: '', os: '', sn: '', location: '', owner: '', env: '', status: 'inuse', remark: '', creds: [] })}>
@@ -100,8 +119,8 @@ export default function AssetPage() {
         <table className="data nowrap">
           <thead>
             <tr>
-              <th>名称</th><th>类别</th><th>IP</th><th>型号 / 系统</th><th>位置</th><th>负责人</th><th>环境</th><th>状态</th>
-              <th className="num">凭据</th><th>更新时间</th><th style={{ width: 150 }}>操作</th>
+              <Th k="name">名称</Th><Th k="type">类别</Th><Th k="ip">IP</Th><Th k="model">型号 / 系统</Th><Th k="location">位置</Th><Th k="owner">负责人</Th><Th k="env">环境</Th><Th k="status">状态</Th>
+              <Th k="credCount" cls="num">凭据</Th><Th k="updatedAt">更新时间</Th><th style={{ width: 150 }}>操作</th>
             </tr>
           </thead>
           <tbody>

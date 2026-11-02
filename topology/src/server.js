@@ -8,6 +8,7 @@ import { syncTopology } from './sync.js';
 import { runDiscovery, cleanupManagedItems } from './discovery.js';
 import { ifaceTraffic } from './traffic.js';
 import { refreshRouteSnapshots, snapshotStatus, tracePath, cleanupRouteItems } from './pathtrace.js';
+import { installAuth, needPerm, needLinkReview } from './authGuard.js';
 
 const db = await openDb(CFG);
 console.log(`[topology-svc] db engine=${db.kind} @ ${db.location}`);
@@ -15,6 +16,9 @@ const zbx = new Zbx(CFG.zbx);
 const app = express();
 app.use(express.json());
 app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', '*'); next(); });
+// 认证：共享 P0 会话文件（env UOCP_SESSIONS_FILE）；/api/* 全站登录，写端点按 perm 细控
+installAuth(app);
+const canPlatform = needPerm('platform.config');
 
 let syncRunning = false, discRunning = false, rtRunning = false;
 
@@ -44,7 +48,7 @@ app.get('/health', async (req, res) => {
 });
 
 // ---------- 同步 ----------
-app.post('/api/topology/sync', async (req, res) => {
+app.post('/api/topology/sync', canPlatform, async (req, res) => {
   if (syncRunning) return res.status(409).json({ error: 'sync running' });
   syncRunning = true;
   try {
@@ -167,7 +171,11 @@ app.get('/api/topology/links/pending', async (req, res) => {
   }
   const from = linkSql + where;
   const total = (await db.prepare(from.replace(linkSql.split(' FROM')[0] + ' FROM', 'SELECT COUNT(*) c FROM')).get(...args)).c;
-  const rows = await db.prepare(from + ' ORDER BY l.confidence DESC, l.link_id DESC LIMIT ? OFFSET ?').all(...args, size, (page - 1) * size);
+  // 排序白名单（列名固定映射，防注入）；默认高置信在前
+  const SORT_COL = { confidence: 'l.confidence', last_seen: 'l.last_seen', missing_rounds: 'l.missing_rounds', link_id: 'l.link_id', source: 'l.source', status: 'l.status' };
+  const sortCol = SORT_COL[req.query.sort] || 'l.confidence';
+  const sortDir = String(req.query.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  const rows = await db.prepare(from + ` ORDER BY ${sortCol} ${sortDir}, l.link_id DESC LIMIT ? OFFSET ?`).all(...args, size, (page - 1) * size);
   // summary 不受 q 影响（用于过滤控件本身），但受 status 影响
   let w2 = ` WHERE l.status IN (${statuses.map(() => '?').join(',')})`; const a2 = [...statuses];
   if (req.query.node_id) { w2 += ' AND l.a_node=?'; a2.push(+req.query.node_id); }
@@ -207,9 +215,9 @@ async function bulkAction(req, res, action) {
   res.json({ ok: true, affected, requested: ids.length });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 }
-app.post('/api/topology/links/bulk-confirm', (req, res) => bulkAction(req, res, 'confirm'));
-app.post('/api/topology/links/bulk-reject', (req, res) => bulkAction(req, res, 'reject'));
-app.post('/api/topology/links/:id/confirm', async (req, res) => {
+app.post('/api/topology/links/bulk-confirm', needLinkReview, (req, res) => bulkAction(req, res, 'confirm'));
+app.post('/api/topology/links/bulk-reject', needLinkReview, (req, res) => bulkAction(req, res, 'reject'));
+app.post('/api/topology/links/:id/confirm', needLinkReview, async (req, res) => {
   try {
   const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
   const l = await db.prepare('SELECT * FROM topology_link WHERE link_id=?').get(+req.params.id);
@@ -220,7 +228,7 @@ app.post('/api/topology/links/:id/confirm', async (req, res) => {
   res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/links/:id/reject', async (req, res) => {
+app.post('/api/topology/links/:id/reject', needLinkReview, async (req, res) => {
   try {
   const operator = req.body?.operator; if (!operator) return res.status(400).json({ error: 'operator required' });
   const l = await db.prepare('SELECT * FROM topology_link WHERE link_id=?').get(+req.params.id);
@@ -230,7 +238,7 @@ app.post('/api/topology/links/:id/reject', async (req, res) => {
   res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/links', async (req, res) => {
+app.post('/api/topology/links', needLinkReview, async (req, res) => {
   try {
   const { a_node_id, a_interface_id, b_node_id, b_interface_id, operator, note } = req.body || {};
   if (!a_node_id || !a_interface_id || !b_node_id || !b_interface_id || !operator)
@@ -250,7 +258,7 @@ app.post('/api/topology/links', async (req, res) => {
   res.status(201).json({ ok: true, link_id: Number(r.lastInsertRowid) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.delete('/api/topology/links/:id', async (req, res) => {
+app.delete('/api/topology/links/:id', needLinkReview, async (req, res) => {
   try {
   const l = await db.prepare('SELECT * FROM topology_link WHERE link_id=?').get(+req.params.id);
   if (!l) return res.status(404).json({ error: 'not found' });
@@ -313,7 +321,7 @@ app.get('/api/topology/graph', async (req, res) => {
 });
 
 // ---------- 发现 ----------
-app.post('/api/topology/discovery/run', async (req, res) => {
+app.post('/api/topology/discovery/run', canPlatform, async (req, res) => {
   if (discRunning) return res.status(409).json({ error: 'discovery running' });
   const nodeIds = req.body?.node_ids || null;
   startDiscovery(nodeIds);
@@ -359,7 +367,7 @@ app.get('/api/topology/discovery/summary', async (req, res) => {
   } });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/discovery/cleanup', async (req, res) => {
+app.post('/api/topology/discovery/cleanup', canPlatform, async (req, res) => {
   try { res.json({ ok: true, deleted: await cleanupManagedItems(zbx) }); }
   catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
@@ -391,7 +399,7 @@ app.get('/api/topology/pathtrace/status', async (req, res) => {
   res.json({ data: s.data, meta: { last_refresh: s.last_refresh, refreshing: rtRunning } });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/pathtrace/refresh', async (req, res) => {
+app.post('/api/topology/pathtrace/refresh', canPlatform, async (req, res) => {
   try {
   if (!zbx.ok()) return res.status(400).json({ error: 'Zabbix 凭据缺失：检查挂载文件 /app/config/source.json（宿主机 ./server/data/source.json）是否含 endpoint 与 token' });
   if (rtRunning) return res.status(409).json({ error: 'route snapshot refresh running' });
@@ -403,7 +411,7 @@ app.post('/api/topology/pathtrace/refresh', async (req, res) => {
   res.status(202).json({ queued: (nodeIds || (await db.prepare("SELECT node_id FROM topology_node WHERE status<>'stale' AND (display_name LIKE '%核心%' OR display_name LIKE '%CORE%' OR display_name LIKE '%汇聚%' OR display_name LIKE '%AGG%' OR display_name LIKE '%FW%' OR display_name LIKE '%防火墙%' OR display_name LIKE '%互联网%' OR display_name LIKE '%接入区%')").all())).length, note: '异步执行（每批创建托管项→等待首轮→读取→删除），GET /api/topology/pathtrace/status 查看' });
   } catch (e) { rtRunning = false; res.status(500).json({ error: String(e.message || e) }); }
 });
-app.post('/api/topology/pathtrace/cleanup', async (req, res) => {
+app.post('/api/topology/pathtrace/cleanup', canPlatform, async (req, res) => {
   try { res.json({ ok: true, deleted: await cleanupRouteItems(zbx) }); }
   catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
