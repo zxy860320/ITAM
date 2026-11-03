@@ -61,6 +61,10 @@ export const api = {
   notify: () => get('/notify'),
   notifySave: (body: any) => post('/notify/save', body),
   notifyTest: (id: string) => post('/notify/test', { id }),
+  // 邮件服务（SMTP 单一配置源，系统管理页编辑；告警/工单只消费）
+  mail: () => get('/mail'),
+  mailSave: (body: any) => post('/mail/save', body),
+  mailTest: (to: string) => post('/mail/test', { to }),
   system: () => get('/system'),
   // 设备操作（经跳板机 JumpServer MCP）
   opsConfig: () => get('/ops/config'),

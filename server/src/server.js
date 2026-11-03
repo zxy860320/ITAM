@@ -84,7 +84,7 @@ const canOpsExec = requirePerm(userStore, 'ops.exec');
 const canPlatformCfg = requirePerm(userStore, 'platform.config');
 
 // ---------- 工单（个人工作台）：录入→邮件给确认人→确认→结束 ----------
-// 邮件复用告警出口 SMTP 通道；确认链接域名优先 notify.json 的 consoleUrl。
+// 邮件走全局「邮件服务」配置（系统管理维护）；确认链接域名优先 notify.json 的 consoleUrl。
 const ticketStore = new TicketStore(DATA_DIR_EARLY);
 mountTickets(app, { store: ticketStore, notifier, userStore, consoleUrlOf: () => notifier.cfg.consoleUrl });
 
@@ -310,6 +310,24 @@ app.post('/api/notify/save', canPlatformCfg, (req, res) => {
 app.post('/api/notify/test', canPlatformCfg, async (req, res) => {
   try {
     const r = await notifier.testChannel(String(req.body?.id || ''));
+    res.json(r);
+  } catch (e) { res.status(502).json({ ok: false, error: String(e.message || e) }); }
+});
+
+// ---------- 邮件服务（SMTP 单一配置源，编辑入口在「系统管理」；告警/工单只消费） ----------
+app.get('/api/mail', (req, res) => res.json(notifier.mailPublic()));
+
+app.post('/api/mail/save', canPlatformCfg, (req, res) => {
+  try {
+    notifier.saveMail(req.body || {});
+    res.json({ ok: true, mail: notifier.mailPublic() });
+  } catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+// 测试邮件：收件人由界面指定，真实发送，结果如实（成功带 messageId，失败原样报错）
+app.post('/api/mail/test', canPlatformCfg, async (req, res) => {
+  try {
+    const r = await notifier.testMail(String(req.body?.to || '').trim());
     res.json(r);
   } catch (e) { res.status(502).json({ ok: false, error: String(e.message || e) }); }
 });

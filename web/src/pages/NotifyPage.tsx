@@ -8,7 +8,7 @@ const TYPES = [
   { key: 'dingtalk', label: '钉钉', hint: '群设置 → 智能群助手 → 添加自定义机器人，复制 Webhook；启用加签则再填 Secret（SEC 开头）' },
   { key: 'feishu', label: '飞书', hint: '群设置 → 群机器人 → 自定义机器人，复制 Webhook；启用签名校验则填 Secret' },
   { key: 'wecom', label: '企业微信', hint: '群设置 → 群机器人 → 添加，复制 Webhook（含 key 即为凭证）' },
-  { key: 'email', label: '邮件', hint: 'SMTP 服务器（如企业邮箱/exmail），发件账号 + 授权码，收件人多个用逗号分隔' },
+  { key: 'email', label: '邮件', hint: '收件人在此维护（多个用逗号分隔）；发件通道（SMTP 服务器/账号/授权码）统一在「系统管理 → 邮件服务」配置，本页只调用' },
 ];
 const SEVS = ['info', 'warning', 'severe', 'critical'];
 const SEV_LABEL: Record<string, string> = { info: '信息及以上', warning: '警告及以上', severe: '严重及以上', critical: '仅灾难' };
@@ -50,8 +50,6 @@ export default function NotifyPage() {
 
   const setCh = (id: string, k: string, v: any) =>
     setDraft((ds: any[]) => ds.map(c => c.id === id ? { ...c, [k]: v } : c));
-  const setSmtp = (id: string, k: string, v: any) =>
-    setDraft((ds: any[]) => ds.map(c => c.id === id ? { ...c, smtp: { ...c.smtp, [k]: v } } : c));
 
   async function save() {
     setSaving(true); setMsg(null);
@@ -134,24 +132,20 @@ export default function NotifyPage() {
             <div style={{ color: 'var(--text-3)', fontSize: 12, marginBottom: 8 }}>{t.hint}</div>
 
             {ch.type === 'email' ? (
-              <div className="grid-2" style={{ gap: 10 }}>
-                <div className="field"><label>SMTP 主机</label>
-                  <input value={ch.smtp.host} onChange={e => setSmtp(ch.id, 'host', e.target.value)} placeholder="smtp.exmail.qq.com" /></div>
-                <div className="field"><label>端口 / 加密</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input style={{ width: 90 }} type="number" value={ch.smtp.port} onChange={e => setSmtp(ch.id, 'port', Number(e.target.value))} />
-                    <div className="seg" style={{ width: 'fit-content' }}>
-                      <button className={ch.smtp.secure ? 'on' : ''} onClick={() => setSmtp(ch.id, 'secure', true)}>SSL(465)</button>
-                      <button className={!ch.smtp.secure ? 'on' : ''} onClick={() => setSmtp(ch.id, 'secure', false)}>STARTTLS(25/587)</button>
-                    </div>
-                  </div></div>
-                <div className="field"><label>发件账号</label>
-                  <input value={ch.smtp.user} onChange={e => setSmtp(ch.id, 'user', e.target.value)} placeholder="monitor@company.com" /></div>
-                <div className="field"><label>授权码/密码（保存后显示为掩码）</label>
-                  <input type="password" value={ch.smtp.pass} onChange={e => setSmtp(ch.id, 'pass', e.target.value)} placeholder="••••••" /></div>
-                <div className="field"><label>收件人（逗号分隔）</label>
-                  <input value={ch.to.join(', ')} onChange={e => setCh(ch.id, 'to', String(e.target.value).split(/[,，]/).map(s => s.trim()).filter(Boolean))}
-                    placeholder="ops@company.com, netteam@company.com" /></div>
+              <div>
+                <div className="grid-2" style={{ gap: 10 }}>
+                  <div className="field" style={{ gridColumn: '1 / -1' }}><label>收件人（逗号分隔）</label>
+                    <input value={ch.to.join(', ')} onChange={e => setCh(ch.id, 'to', String(e.target.value).split(/[,，]/).map(s => s.trim()).filter(Boolean))}
+                      placeholder="ops@company.com, netteam@company.com" /></div>
+                </div>
+                {/* SMTP 参数只读引用：单一配置源在「系统管理 → 邮件服务」，本页不重复维护 */}
+                <div style={{ background: 'var(--bg-inset)', border: '1px solid var(--hairline)', borderRadius: 8, padding: '10px 12px', fontSize: 12.5, display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span style={{ color: 'var(--text-3)' }}>发件通道（只读）：</span>
+                  {cfg.mail?.ready
+                    ? <span className="mono" style={{ color: 'var(--sev-healthy)' }}>✔ {cfg.mail.host}:{cfg.mail.port}（{cfg.mail.secure ? 'SSL' : 'STARTTLS'}）· 发件 {cfg.mail.user}</span>
+                    : <span style={{ color: 'var(--sev-critical)' }}>✘ 邮件服务尚未配置——告警邮件与工单邮件都无法发出</span>}
+                  <a href="#/system" style={{ color: 'var(--accent, #6ea8fe)', textDecoration: 'none' }}>前往「系统管理 → 邮件服务」配置并测试 →</a>
+                </div>
               </div>
             ) : (
               <div className="grid-2" style={{ gap: 10 }}>

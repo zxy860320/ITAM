@@ -52,11 +52,15 @@ function maskUrl(u) {
   } catch { return mask(u); }
 }
 
+// 全局邮件服务配置（SMTP）：唯一收发来源，告警出口/工单/测试邮件全部消费它。
+// 编辑入口在「系统管理 → 邮件服务」；通道(type=email)只决定"发给谁"，不再自带 SMTP 参数。
+const blankMail = () => ({ host: '', port: 465, secure: true, user: '', pass: '', from: '' });
+
 export class Notifier {
   constructor(cfgFile, stateFile) {
     this.cfgFile = cfgFile;
     this.stateFile = stateFile;
-    this.cfg = { enabled: false, consoleUrl: '', channels: [] };
+    this.cfg = { enabled: false, consoleUrl: '', channels: [], mail: blankMail() };
     this.state = { baseline: false, open: {}, closed: {} };
     this.log = [];            // 内存发送日志（最近 100 条）
     this.stats = { sent: 0, fail: 0, lastOk: null, lastErr: null };
@@ -68,6 +72,11 @@ export class Notifier {
   _load() {
     try { Object.assign(this.cfg, JSON.parse(fs.readFileSync(this.cfgFile, 'utf-8'))); } catch { /* 首次运行用默认 */ }
     try { this.state = Object.assign(this.state, JSON.parse(fs.readFileSync(this.stateFile, 'utf-8'))); } catch { /* 无状态文件 */ }
+    // 兼容旧配置：全局 mail 未设置时，从首个带 SMTP 参数的 email 通道一次性迁移
+    if (!this.cfg.mail?.host) {
+      const legacy = (this.cfg.channels || []).find(c => c.type === 'email' && c.smtp?.host);
+      this.cfg.mail = legacy ? { ...blankMail(), ...legacy.smtp } : blankMail();
+    }
     this._prune();
   }
   saveCfg() {
@@ -123,8 +132,31 @@ export class Notifier {
       enabled: body.enabled !== false,
       consoleUrl: body.consoleUrl ?? this.cfg.consoleUrl ?? '',
       channels,
+      mail: this.cfg.mail || blankMail(),   // 告警出口页保存不动邮件服务配置（单一来源在系统管理）
     };
     this.saveCfg();
+  }
+
+  // ---------- 邮件服务配置（系统管理页专用，掩码回填同 saveConfig） ----------
+  saveMail(body) {
+    const o = this.cfg.mail || blankMail();
+    const keep = (v, prev) => (v == null || v === '' || isMasked(v)) ? (prev ?? '') : v;
+    const port = Number(body.port);
+    this.cfg.mail = {
+      host: String(body.host ?? o.host ?? '').trim(),
+      port: Number.isFinite(port) && port > 0 && port < 65536 ? port : (o.port || 465),
+      secure: body.secure ?? o.secure ?? true,
+      user: keep(body.user, o.user),
+      pass: keep(body.pass, o.pass),
+      from: String(body.from ?? o.from ?? '').trim(),
+    };
+    this.saveCfg();
+    return this.cfg.mail;
+  }
+
+  mailPublic() {
+    const m = this.cfg.mail || blankMail();
+    return { ...m, pass: m.pass ? mask(m.pass) : '', ready: !!(m.host && m.user) };
   }
 
   // ---------- 对前端/接口的视图（敏感字段掩码） ----------
@@ -139,6 +171,8 @@ export class Notifier {
         smtp: { ...c.smtp, pass: c.smtp.pass ? mask(c.smtp.pass) : '' },
         stats: c.stats || null,
       })),
+      // 全局邮件服务（脱敏）：告警出口页只读引用，编辑入口在系统管理
+      mail: this.mailPublic(),
       state: { open: Object.keys(this.state.open).length, baseline: this.state.baseline },
       stats: this.stats,
       log: this.log.slice(0, 50),
@@ -216,54 +250,51 @@ export class Notifier {
     return http(this._signUrl(ch), this._payload(ch, msg));
   }
 
-  async _transport(ch) {
+  async _sendEmail(ch, msg) {
+    if (!ch.to?.length) throw new Error('邮件通道未配置收件人');
+    await this._sendMailRaw(ch.to.join(','), msg.title, msg.text, ch.id);
+    return { ok: true };
+  }
+
+  /** 用全局邮件服务配置发一封邮件（transport 按配置指纹缓存，改配置自动失效） */
+  async _sendMailRaw(to, subject, text, idTag = 'mail', html = '') {
+    const m = this.cfg.mail;
+    if (!m?.host || !m.user) throw new Error('邮件服务未配置：请到「系统管理 → 邮件服务」填写 SMTP 主机与发件账号');
     // nodemailer 10.x 连接前走 dns.resolve4/6，本机环境该路径会超时（系统解析却正常）。
     // 对策：先用系统解析器（dns.lookup，走 hosts/系统缓存）把域名换成 IP，
     // nodemailer 对 IP 型 host 跳过自身 DNS；servername 仍带原域名（TLS SNI）。
-    let host = ch.smtp.host;
+    let host = m.host;
     let servername;
     if (!net.isIP(host)) {
       try {
         const recs = await dnsPromises.lookup(host, { all: true });
-        if (recs.length) { host = recs[0].address; servername = ch.smtp.host; }
+        if (recs.length) { host = recs[0].address; servername = m.host; }
       } catch { /* 系统解析失败→原样交给 nodemailer 自行处理 */ }
     }
-    const key = `${ch.id}|${host}|${ch.smtp.port}|${ch.smtp.user}`;
+    // 缓存键含配置指纹：任一参数（含密码）变更即换新建 transport
+    const key = `${idTag}|${host}|${m.port}|${m.user}|${crypto.createHash('sha1').update(String(m.pass || '')).digest('hex').slice(0, 8)}`;
     let t = this._transports.get(key);
     if (!t) {
       t = nodemailer.createTransport({
-        host, port: ch.smtp.port, secure: !!ch.smtp.secure,
+        host, port: m.port, secure: !!m.secure,
         ...(servername ? { servername } : {}),
-        auth: { user: ch.smtp.user, pass: ch.smtp.pass },
+        auth: { user: m.user, pass: m.pass },
         connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000,
       });
       this._transports.set(key, t);
     }
-    return t;
-  }
-
-  async _sendEmail(ch, msg) {
-    if (!ch.smtp?.host || !ch.to?.length) throw new Error('未配置 SMTP 或收件人');
-    await (await this._transport(ch)).sendMail({
-      from: ch.smtp.from || ch.smtp.user,
-      to: ch.to.join(','),
-      subject: msg.title,
-      text: msg.text,
-    });
-    return { ok: true };
+    return t.sendMail({ from: m.from || m.user, to, subject, text, ...(html ? { html } : {}) });
   }
 
   /**
-   * 一次性业务邮件（工单确认等，非告警差分流程）：取第一个启用的 email 通道直发。
+   * 一次性业务邮件（工单确认等，非告警差分流程）：走全局邮件服务配置（系统管理维护）。
    * 不依赖全局 enabled（告警关了工单邮件照发）；发送失败抛错由调用方如实落账。
    */
   async sendBusinessMail(to, subject, text, html) {
-    const ch = this.cfg.channels.find(c => c.type === 'email' && c.enabled && c.smtp?.host);
-    if (!ch) throw new Error('未配置可用的邮件通道：请到「告警出口」添加并启用 SMTP 邮件通道');
-    await (await this._transport(ch)).sendMail({
-      from: ch.smtp.from || ch.smtp.user, to, subject, text, html,
-    });
-    return { channel: ch.label, from: ch.smtp.from || ch.smtp.user };
+    const m = this.cfg.mail;
+    if (!m?.host || !m.user) throw new Error('未配置邮件服务：请到「系统管理 → 邮件服务」配置 SMTP 并保存');
+    await this._sendMailRaw(to, subject, text || subject, 'biz', html || '');
+    return { channel: '邮件服务', from: m.from || m.user };
   }
 
   _logIt(ch, kind, n, ok, err) {
@@ -343,7 +374,8 @@ export class Notifier {
   }
 
   // ---------- 测试发送（配置页"测试"按钮） ----------
-  async testChannel(id) {    const ch = this.cfg.channels.find(c => c.id === id);
+  async testChannel(id) {
+    const ch = this.cfg.channels.find(c => c.id === id);
     if (!ch) throw new Error('通道不存在');
     const msg = {
       title: '【测试】IT运维监控平台告警出口',
@@ -357,5 +389,21 @@ export class Notifier {
       this._logIt(ch, 'test', 1, false, String(e.message || e));
       throw e;
     }
+  }
+
+  // ---------- 邮件服务测试（系统管理页"发送测试邮件"，收件人由界面指定） ----------
+  // 真实发送、结果如实：成功返回 messageId，失败原样抛出（不假称送达）。
+  async testMail(to) {
+    const m = this.cfg.mail;
+    if (!m?.host || !m.user) throw new Error('邮件服务未配置：请先填写 SMTP 主机与发件账号并保存');
+    if (!to) throw new Error('请填写测试收件人邮箱');
+    const t0 = Date.now();
+    const info = await this._sendMailRaw(to, '【测试】IT运维平台邮件服务连通性验证',
+      `【测试】IT运维平台邮件服务连通性验证\nSMTP: ${m.host}:${m.port}（${m.secure ? 'SSL' : 'STARTTLS'}）\n发件: ${m.from || m.user}\n时间: ${new Date().toLocaleString('zh-CN', { hour12: false })}\n收到本邮件即表示邮件服务配置正确，告警与工单邮件均可正常发出。`, 'test');
+    const rec = { at: Date.now(), channel: '邮件服务', type: '邮件(SMTP)', kind: 'mail-test', events: 1, ok: true };
+    this.log.unshift(rec);
+    if (this.log.length > 100) this.log.length = 100;
+    this.stats.sent++; this.stats.lastOk = rec.at;
+    return { ok: true, latencyMs: Date.now() - t0, messageId: info.messageId || null };
   }
 }
