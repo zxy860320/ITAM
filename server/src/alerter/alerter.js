@@ -268,7 +268,9 @@ export class Notifier {
     if (!net.isIP(host)) {
       try {
         const recs = await dnsPromises.lookup(host, { all: true });
-        if (recs.length) { host = recs[0].address; servername = m.host; }
+        // 明确优先 IPv4：机房普遍无 IPv6 路由，若解析把 AAAA 排前会连不上（症状同样是 Connection timeout）
+        const pick = recs.find(r => r.family === 4) || recs[0];
+        if (pick) { host = pick.address; servername = m.host; }
       } catch { /* 系统解析失败→原样交给 nodemailer 自行处理 */ }
     }
     // 缓存键含配置指纹：任一参数（含密码）变更即换新建 transport
