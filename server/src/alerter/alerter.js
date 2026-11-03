@@ -398,8 +398,19 @@ export class Notifier {
     if (!m?.host || !m.user) throw new Error('邮件服务未配置：请先填写 SMTP 主机与发件账号并保存');
     if (!to) throw new Error('请填写测试收件人邮箱');
     const t0 = Date.now();
-    const info = await this._sendMailRaw(to, '【测试】IT运维平台邮件服务连通性验证',
-      `【测试】IT运维平台邮件服务连通性验证\nSMTP: ${m.host}:${m.port}（${m.secure ? 'SSL' : 'STARTTLS'}）\n发件: ${m.from || m.user}\n时间: ${new Date().toLocaleString('zh-CN', { hour12: false })}\n收到本邮件即表示邮件服务配置正确，告警与工单邮件均可正常发出。`, 'test');
+    let info;
+    try {
+      info = await this._sendMailRaw(to, '【测试】IT运维平台邮件服务连通性验证',
+        `【测试】IT运维平台邮件服务连通性验证\nSMTP: ${m.host}:${m.port}（${m.secure ? 'SSL' : 'STARTTLS'}）\n发件: ${m.from || m.user}\n时间: ${new Date().toLocaleString('zh-CN', { hour12: false })}\n收到本邮件即表示邮件服务配置正确，告警与工单邮件均可正常发出。`, 'test');
+    } catch (e) {
+      // 失败也落发送记录（页面上「最近发送记录」可查），并打印服务端日志便于排查
+      const em = String(e.message || e);
+      this.log.unshift({ at: Date.now(), channel: '邮件服务', type: '邮件(SMTP)', kind: 'mail-test', events: 1, ok: false, error: em });
+      if (this.log.length > 100) this.log.length = 100;
+      this.stats.fail++; this.stats.lastErr = Date.now();
+      console.warn(`[notify] 邮件服务测试失败 (${m.host}:${m.port} → ${to}):`, em);
+      throw e;
+    }
     const rec = { at: Date.now(), channel: '邮件服务', type: '邮件(SMTP)', kind: 'mail-test', events: 1, ok: true };
     this.log.unshift(rec);
     if (this.log.length > 100) this.log.length = 100;
