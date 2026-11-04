@@ -144,7 +144,7 @@ export default function NotifyPage() {
                   {cfg.mail?.ready
                     ? <span className="mono" style={{ color: 'var(--sev-healthy)' }}>✔ {cfg.mail.host}:{cfg.mail.port}（{cfg.mail.secure ? 'SSL' : 'STARTTLS'}）· 发件 {cfg.mail.user}</span>
                     : <span style={{ color: 'var(--sev-critical)' }}>✘ 邮件服务尚未配置——告警邮件与工单邮件都无法发出</span>}
-                  <a href="#/system" style={{ color: 'var(--accent, #6ea8fe)', textDecoration: 'none' }}>前往「系统管理 → 邮件服务」配置并测试 →</a>
+                  <a href="#/system-mail" style={{ color: 'var(--accent, #6ea8fe)', textDecoration: 'none' }}>前往「系统管理 → 邮件服务」配置并测试 →</a>
                 </div>
               </div>
             ) : (

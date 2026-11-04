@@ -86,6 +86,10 @@ body {
 .nav-item.active { background: var(--bg-inset); color: var(--text-1); border-left-color: var(--dom-server); font-weight: 500; }
 .nav-item .dom-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
 .nav-badge { margin-left: auto; font-family: var(--ff-mono); font-size: 11px; color: var(--sev-critical); }
+/* 二级子菜单（系统管理等可展开组）：父项带 caret，子项缩进+竖线引导 */
+.nav-item .nav-caret { margin-left: auto; font-size: 13px; color: var(--text-3); transform: rotate(90deg); }
+.nav-sub { margin-left: 18px; padding: 6px 10px; font-size: 12.5px; position: relative; }
+.nav-sub::before { content: ''; position: absolute; left: -10px; top: 0; bottom: 0; width: 1px; background: var(--hairline); }
 .sidebar-foot { margin-top: auto; padding: 12px 16px; border-top: 1px solid var(--hairline); font-size: 11px; color: var(--text-3); }
 .sidebar-foot .dot-live { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--sev-healthy); margin-right: 6px; }
 

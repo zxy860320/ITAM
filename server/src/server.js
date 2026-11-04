@@ -444,6 +444,9 @@ app.get('/api/system', (req, res) => {
     roles: userStore.roles.map(r => ({ role: r.id, label: r.label, builtin: r.builtin, perms: r.perms })),
     users: { total: userStore.users.length, local: userStore.users.filter(u => u.source === 'local').length, ad: userStore.users.filter(u => u.source === 'ad').length },
     ad: { enabled: userStore.adConfig.enabled, url: userStore.adConfig.url || '(未配置)' },
+    // 组件状态速览（概览页用；凭据不出接口，只回布尔）
+    mailReady: !!notifier.cfg.mail?.host && !!notifier.cfg.mail?.user,
+    notifyEnabled: !!notifier.cfg.enabled,
     auditLog: readAuditTail(),
   });
 });

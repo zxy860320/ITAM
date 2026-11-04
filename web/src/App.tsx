@@ -16,7 +16,10 @@ import NotifyPage from './pages/NotifyPage';
 import OpsPage from './pages/OpsPage';
 import AssetPage from './pages/AssetPage';
 import AssistantPage from './pages/AssistantPage';
-import SystemPage from './pages/SystemPage';
+import SystemOverviewPage from './pages/system/SystemOverviewPage';
+import SystemMailPage from './pages/system/SystemMailPage';
+import SystemPermsPage from './pages/system/SystemPermsPage';
+import SystemAuditPage from './pages/system/SystemAuditPage';
 import UsersPage from './pages/UsersPage';
 import TicketPage from './pages/TicketPage';
 import TicketConfirmPage from './pages/TicketConfirmPage';
@@ -43,7 +46,12 @@ const NAV = [
     { key: 'notify', label: '告警出口', hash: '#/notify' },
     { key: 'ops', label: '设备操作', hash: '#/ops', color: 'var(--dom-service)' },
     { key: 'assistant', label: 'AI 助手', hash: '#/assistant', color: 'var(--dom-wlan)' },
-    { key: 'system', label: '系统管理', hash: '#/system' },
+    { key: 'system', label: '系统管理', hash: '#/system', children: [
+      { key: 'system', label: '运行概览', hash: '#/system' },
+      { key: 'system-mail', label: '邮件服务', hash: '#/system-mail' },
+      { key: 'system-perms', label: '权限与账号', hash: '#/system-perms' },
+      { key: 'system-audit', label: '审计日志', hash: '#/system-audit' },
+    ]},
     { key: 'users', label: '用户管理', hash: '#/users', perm: 'user.manage' },
   ]},
 ];
@@ -64,7 +72,10 @@ const PAGES: Record<string, [React.FC<any>, string]> = {
   ops: [OpsPage, '设备操作'],
   assets: [AssetPage, '资产管理'],
   assistant: [AssistantPage, 'AI 助手'],
-  system: [SystemPage, '系统管理'],
+  system: [SystemOverviewPage, '系统管理 / 运行概览'],
+  'system-mail': [SystemMailPage, '系统管理 / 邮件服务'],
+  'system-perms': [SystemPermsPage, '系统管理 / 权限与账号'],
+  'system-audit': [SystemAuditPage, '系统管理 / 审计日志'],
   users: [UsersPage, '用户管理'],
   tickets: [TicketPage, '工单工作台'],
 };
@@ -136,7 +147,17 @@ export default function App() {
           {visibleNav.map(g => (
             <div key={g.group}>
               <div className="nav-group-label">{g.group}</div>
-              {g.items.map(it => (
+              {g.items.map((it: any) => it.children ? (
+                <div key={it.key} className="nav-parent">
+                  <a className={`nav-item ${it.children.some((c: any) => c.key === route) ? 'active' : ''}`} href={it.hash}>
+                    {it.label}
+                    <span className="nav-caret">›</span>
+                  </a>
+                  {it.children.map((c: any) => (
+                    <a key={c.key} className={`nav-item nav-sub ${route === c.key ? 'active' : ''}`} href={c.hash}>{c.label}</a>
+                  ))}
+                </div>
+              ) : (
                 <a key={it.key} className={`nav-item ${route === it.key ? 'active' : ''}`} href={it.hash}>
                   {it.color && <i className="dom-dot" style={{ background: it.color }} />}
                   {it.label}
