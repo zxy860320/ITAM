@@ -121,6 +121,7 @@ export function mountOps(app, { notifier }) {
     try {
       res.json(await runTpl(req.body || {}));
     } catch (e) {
+      console.warn(`[ops] exec 失败 (${req.body?.asset || '?'} tpl=${req.body?.tpl || '?'}): ${String(e.message || e)}`);
       res.status(e.status || 502).json({ ok: false, error: String(e.message || e) });
     }
   });
@@ -137,6 +138,7 @@ export function mountOps(app, { notifier }) {
     try {
       res.json(await runTpl({ asset, tpl }));
     } catch (e) {
+      console.warn(`[ops] backup 失败 (${asset} tpl=${tpl}): ${String(e.message || e)}`);
       res.status(e.status || 502).json({ ok: false, error: String(e.message || e) });
     } finally {
       inFlight.delete(String(asset));
