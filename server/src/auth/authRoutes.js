@@ -83,6 +83,26 @@ export function mountAuth(app, store) {
     res.json({ user: req.auth.user, role: req.auth.role, perms: req.auth.role?.perms || [] });
   });
 
+  // ---- nginx auth_request 探测端点（Open WebUI 受信头 SSO） ----
+  // :3001 的 nginx 对每个请求向这里发子请求（auth_request 会转发原始 Cookie）：
+  //   会话有效 → 200 + X-ITYW-Email/Name/Role 响应头，nginx 取到后注入主请求转发给 open-webui（自动建档+登录）；
+  //   无/失效会话 → 401，nginx 原样回 401，请求根本不触达 open-webui。
+  // 身份只走响应头、body 零信息；Email 恒用 `<username>@ityw.local`（OWUI 账号主键，
+  // 与用户资料里可空的 email 字段解耦，保证确定性）。不落审计——OWUI 页面每个资源都会触发。
+  app.get('/api/auth/probe', (req, res) => {
+    if (!req.auth) return res.status(401).end();
+    // HTTP 头值必须 ASCII（displayName 常为中文会抛 ERR_INVALID_CHAR，nginx 转发同样受限）：
+    // 含非 ASCII 字符时退回 username（其本身受 ^[a-z0-9._@-]$ 约束恒为 ASCII）
+    const rawName = req.auth.user.displayName || '';
+    const safeName = /^[\x20-\x7e]*$/.test(rawName) ? rawName : '';
+    res.setHeader('X-ITYW-Email', `${req.auth.user.username}@ityw.local`);
+    res.setHeader('X-ITYW-Name', safeName || req.auth.user.username);
+    // OWUI 受信角色头只认 admin/user/pending；operator/viewer 一律 user
+    // （注意：req.auth.user 是脱敏视图不含 role 字符串，角色 id 在 req.auth.role?.id）
+    res.setHeader('X-ITYW-Role', req.auth.role?.id === 'admin' ? 'admin' : 'user');
+    res.status(200).end();
+  });
+
   app.post('/api/auth/change-password', (req, res) => {
     if (!req.auth) return res.status(401).json({ error: 'not_logged_in' });
     const u = store.userById(req.auth.user.id);

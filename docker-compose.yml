@@ -80,10 +80,14 @@ services:
     #   - "127.0.0.1:8790:8790"
 
   # AI 助手前端（Open WebUI）：平台内嵌页 iframe 指向它；MCP 工具层 = server:8787/mcp
+  # 账号与 ITYW 打通（受信头 SSO，见 deploy/nginx.conf :3001 块）：
+  #   nginx 先经 P0 /api/auth/probe 验证平台会话，通过后注入 X-ITYW-Email/Name/Role，
+  #   OWUI 据此自动建档登录——ITYW admin 同步为 OWUI admin，其余角色为 user。
   # 首次部署后管理员配置一次：
   #   1) Settings > Admin > Integrations > External Tool Servers > Add Connection
   #      Type=MCP (Streamable HTTP), URL=http://server:8787/mcp, Auth=None
   #   2) Settings > Admin > Connections 配 OpenAI 兼容模型端点（内网 vLLM/Ollama 均可）
+  # 安全前提：open-webui 不映射宿主端口（只有 nginx 可达），受信头不可被客户端伪造。
   open-webui:
     image: ghcr.io/open-webui/open-webui:v0.12.5
     restart: unless-stopped
@@ -98,6 +102,12 @@ services:
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"
       WEBUI_URL: ${AI_PUBLIC_URL:-}
       DATA_DIR: /app/backend/data
+      # ── ITYW 受信头 SSO ──
+      WEBUI_AUTH_TRUSTED_EMAIL_HEADER: X-ITYW-Email
+      WEBUI_AUTH_TRUSTED_NAME_HEADER: X-ITYW-Name
+      WEBUI_AUTH_TRUSTED_ROLE_HEADER: X-ITYW-Role
+      # 新建账号默认 user（角色头每次登录再校准）；避免 pending 卡审批
+      DEFAULT_USER_ROLE: user
     volumes:
       - open_webui_data:/app/backend/data
     # 仅 nginx(3001 server 块) 经内部网络访问，不直接映射宿主机端口：
