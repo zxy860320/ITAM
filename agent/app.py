@@ -13,6 +13,7 @@
   ITYW_MCP_URL=http://127.0.0.1:8787/mcp   ITYW_MCP_TOKEN=（可选 Bearer）
   LLM_BASE_URL=https://...  LLM_API_KEY=...  LLM_MODEL=qwen2.5:32b
   AGENT_DB=data/checkpoints.db
+  界面「AI 助手 → 模型配置」保存的设置存 data/llm_settings.json，优先于 .env，改后免重启。
 """
 import json
 import os
@@ -30,6 +31,8 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "unused")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")
 DB_PATH = Path(os.environ.get("AGENT_DB", str(HERE / "data" / "checkpoints.db")))
+# 界面可配置的模型设置（覆盖 .env 种子）；放在 data/ 下：compose 已卷挂载、gitignore 已排除
+SETTINGS_PATH = Path(os.environ.get("AGENT_LLM_SETTINGS", str(DB_PATH.parent / "llm_settings.json")))
 
 TOOLS_TTL = 300  # 秒；MCP 工具列表缓存，平台重启后最迟 5 分钟自动接上
 
@@ -54,16 +57,47 @@ _graph = None
 _graph_tools_id: int = 0
 
 
+# ---------- 模型配置：三层优先 界面保存(llm_settings.json) > .env > 空 ----------
+
+def _env_cfg() -> dict:
+    return {"base_url": LLM_BASE_URL, "api_key": LLM_API_KEY, "model": LLM_MODEL}
+
+
+def _file_cfg() -> dict | None:
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return {k: str(d.get(k) or "") for k in ("base_url", "api_key", "model")}
+    except Exception:
+        return None
+
+
+def llm_cfg() -> dict:
+    env = _env_cfg()
+    fc = _file_cfg()
+    if fc and fc.get("model"):
+        # 界面保存的 base_url/api_key 留空时回退 .env（密钥可以只改模型名）
+        return {"base_url": fc["base_url"] or env["base_url"],
+                "api_key": fc["api_key"] or env["api_key"],
+                "model": fc["model"], "source": "settings"}
+    return {**env, "source": "env"}
+
+
+def mask_key(k: str) -> str:
+    return (k[:4] + "…" + k[-4:]) if len(k) > 10 else ("…" if k else "")
+
+
 def llm_ready() -> bool:
-    return bool(LLM_MODEL)
+    return bool(llm_cfg()["model"])
 
 
-def llm():
+def llm(cfg: dict | None = None):
+    c = cfg or llm_cfg()
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
-        model=LLM_MODEL,
-        api_key=LLM_API_KEY or "unused",
-        base_url=LLM_BASE_URL or None,
+        model=c["model"],
+        api_key=c["api_key"] or "unused",
+        base_url=c["base_url"] or None,
         temperature=0.2,
         streaming=True,
         timeout=120,
@@ -98,6 +132,71 @@ def build_graph(model, tools, checkpointer):
 
 _saver = None
 _saver_cm = None  # 必须保持模块级引用：局部变量会被 GC，导致下一请求 checkpointer 连接失效
+_graph_cfg_sig = ""  # graph 使用的模型配置签名；界面改配置后签名不匹配 → 自动重建，无需重启
+
+
+def _cfg_sig(c: dict) -> str:
+    return f"{c['base_url']}|{c['model']}"
+
+
+@app.get("/llm-settings")
+async def llm_settings_get():
+    c = llm_cfg()
+    return {"ok": True, "base_url": c["base_url"], "model": c["model"],
+            "api_key_masked": mask_key(c["api_key"]), "source": c["source"]}
+
+
+@app.post("/llm-settings")
+async def llm_settings_save(req: Request):
+    """界面保存模型配置：写 llm_settings.json，下一条消息即生效（graph 按配置签名重建）。"""
+    body = await req.json()
+    model = str(body.get("model") or "").strip()
+    base_url = str(body.get("base_url") or "").strip()
+    if not model:
+        return JSONResponse({"ok": False, "error": "model 不能为空"}, status_code=400)
+    if base_url and not base_url.startswith(("http://", "https://")):
+        return JSONResponse({"ok": False, "error": "base_url 需以 http(s):// 开头"}, status_code=400)
+    # api_key：请求里留空 = 沿用已保存值（界面只回掩码，不回显明文）
+    api_key = str(body.get("api_key") or "").strip() or _file_cfg_or_env_key()
+    data = {"base_url": base_url, "api_key": api_key, "model": model,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"保存失败：{e}"}, status_code=500)
+    return {"ok": True, "base_url": base_url, "model": model, "api_key_masked": mask_key(api_key)}
+
+
+def _file_cfg_or_env_key() -> str:
+    fc = _file_cfg()
+    return (fc or {}).get("api_key") or LLM_API_KEY
+
+
+@app.post("/llm-test")
+async def llm_test(req: Request):
+    """用将要生效的配置真实发一条最小补全——走与聊天相同的 OpenAI 兼容通道。"""
+    body = await req.json()
+    model = str(body.get("model") or "").strip()
+    if not model:
+        c = llm_cfg()
+        base_url, api_key, model = c["base_url"], c["api_key"], c["model"]
+    else:
+        base_url = str(body.get("base_url") or "").strip() or llm_cfg()["base_url"]
+        api_key = str(body.get("api_key") or "").strip() or _file_cfg_or_env_key()
+    if not model:
+        return {"ok": False, "error": "模型名为空：请填写 LiteLLM/Ollama 里注册的名（如 general）"}
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url or "https://api.openai.com/v1",
+                        api_key=api_key or "unused", timeout=30)
+        r = client.chat.completions.create(model=model, max_tokens=1,
+                                           messages=[{"role": "user", "content": "hi"}])
+        return {"ok": True, "model": model, "base_url": base_url,
+                "reply_id": getattr(r, "id", "")[:24]}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
 
 
 @app.post("/chat")
@@ -110,27 +209,29 @@ async def chat(req: Request):
         return "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
 
     async def gen():
-        global _graph, _graph_tools_id, _saver
+        global _graph, _graph_tools_id, _saver, _graph_cfg_sig
         if not message:
             yield sse({"type": "error", "message": "消息为空"})
             return
         if not llm_ready():
-            yield sse({"type": "error", "message": "模型未配置：请在 .env 设置 LLM_BASE_URL / LLM_MODEL 后重启 agent 服务"})
+            yield sse({"type": "error", "message": "模型未配置：在本页「模型配置」填写 LiteLLM/Ollama 的模型名并保存，或 .env 设置 LLM_BASE_URL / LLM_MODEL"})
             return
         try:
             tools = await get_tools()
         except Exception as e:
             yield sse({"type": "error", "message": f"工具层连接失败：{e}（检查平台后端与 /mcp 是否在线）"})
             return
-        if _graph is None or _graph_tools_id != id(_tools):
+        cfg_llm = llm_cfg()
+        if _graph is None or _graph_tools_id != id(_tools) or _graph_cfg_sig != _cfg_sig(cfg_llm):
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
             DB_PATH.parent.mkdir(parents=True, exist_ok=True)
             if _saver is None:
                 global _saver_cm
                 _saver_cm = AsyncSqliteSaver.from_conn_string(str(DB_PATH))
                 _saver = await _saver_cm.__aenter__()
-            _graph = build_graph(llm(), tools, _saver)
+            _graph = build_graph(llm(cfg_llm), tools, _saver)
             _graph_tools_id = id(_tools)
+            _graph_cfg_sig = _cfg_sig(cfg_llm)
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         # 注入当前时间，让"最近/今天"类问题有时间基准（不改动用户原文展示）
         user_msg = f"[当前时间 {now}]\n{message}"
@@ -195,10 +296,12 @@ async def health():
         tools_n, mcp_ok = len(tools), True
     except Exception as e:
         err = str(e)
+    c = llm_cfg()
     return {
         "ok": mcp_ok and llm_ready(),
         "mcp": {"url": MCP_URL, "connected": mcp_ok, "tools": tools_n, "error": err},
-        "llm": {"configured": llm_ready(), "model": LLM_MODEL or None, "base_url": LLM_BASE_URL or None},
+        "llm": {"configured": bool(c["model"]), "model": c["model"] or None,
+                "base_url": c["base_url"] or None, "source": c["source"]},
     }
 
 

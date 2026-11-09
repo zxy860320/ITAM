@@ -39,3 +39,6 @@ agent/.venv/
 agent/data/
 # playwright 调试产物
 .playwright-cli/
+
+# agent 运行时字节码
+agent/__pycache__/

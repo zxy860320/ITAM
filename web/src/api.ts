@@ -97,6 +97,9 @@ export const api = {
   // AI agent（LangGraph 服务，经 server 代理 /api/agent/*）
   agentHealth: () => get('/agent/health'),
   agentReset: (thread_id: string) => post('/agent/reset', { thread_id }),
+  agentLlmSettings: () => get('/agent/llm-settings'),
+  agentLlmSave: (d: { base_url: string; api_key: string; model: string }) => post('/agent/llm-settings', d),
+  agentLlmTest: (d: { base_url?: string; api_key?: string; model?: string }) => post('/agent/llm-test', d),
 };
 
 /** 与 agent 服务通信的 SSE（POST /api/agent/chat，逐事件回调）。返回 abort 函数。 */

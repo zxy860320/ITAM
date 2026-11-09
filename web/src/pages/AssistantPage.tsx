@@ -108,9 +108,10 @@ function AgentChat() {
           <b>Agent 服务未就绪。</b>{' '}
           {hErr && <span>{hErr}（agent 服务可能未启动：本地 <code className="mono">agent/.venv/Scripts/python.exe agent/app.py</code>，容器 <code className="mono">docker compose up -d agent</code>）</span>}
           {health && health.mcp && !health.mcp.connected && <span>MCP 连接失败：{health.mcp.error}</span>}
-          {owuiHint && <span>工具层已加载 {health.mcp?.tools} 个工具；还差模型——在 .env 配 <code className="mono">LLM_BASE_URL</code> / <code className="mono">LLM_MODEL</code>（Ollama 则 base_url 填 <code className="mono">http://&lt;host&gt;:11434/v1</code>）后重启 agent。</span>}
+          {owuiHint && <span>工具层已加载 {health.mcp?.tools} 个工具；还差模型——在下方「模型配置」填写模型名并保存即可（免重启）。</span>}
         </div>
       )}
+      <LlmSettingsCard health={health} onChanged={() => api.agentHealth().then(setHealth).catch(() => {})} />
       <div ref={scrollRef} className="chatbox">
         {s.msgs.length === 0 && (
           <div className="empty-tip" style={{ marginTop: 40 }}>
@@ -148,6 +149,86 @@ function AgentChat() {
           : <button className="btn primary" onClick={() => send()}>发送</button>}
         <button className="btn" onClick={newSession}>新会话</button>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- 模型配置卡片（保存即生效，免重启） ---------------- */
+
+function LlmSettingsCard({ health, onChanged }: { health: any; onChanged: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [cfg, setCfg] = React.useState<any>(null);
+  const [form, setForm] = React.useState({ base_url: '', api_key: '', model: '' });
+  const [busy, setBusy] = React.useState<'test' | 'save' | ''>('');
+  const [msg, setMsg] = React.useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const load = () => api.agentLlmSettings()
+    .then(d => { setCfg(d); setForm(f => ({ ...f, base_url: f.base_url || d.base_url || '', model: f.model || d.model || '' })); })
+    .catch(e => setMsg({ kind: 'err', text: `读取模型配置失败：${e?.message || e}` }));
+  React.useEffect(() => { if (open && !cfg) load(); }, [open]);
+
+  // 未就绪且模型缺失时自动展开，管理员一进页面就能看到
+  React.useEffect(() => { if (health && !health.llm?.configured) setOpen(true); }, [health]);
+
+  const test = async () => {
+    setBusy('test'); setMsg(null);
+    try {
+      const d = await api.agentLlmTest({ base_url: form.base_url, api_key: form.api_key, model: form.model });
+      setMsg(d.ok
+        ? { kind: 'ok', text: `连接成功：模型「${d.model}」可用（端点 ${d.base_url || '默认'}）` }
+        : { kind: 'err', text: d.error || '测试失败' });
+    } catch (e: any) { setMsg({ kind: 'err', text: `测试失败：${e?.message || e}（保存/测试需要 platform.config 权限）` }); }
+    setBusy('');
+  };
+  const save = async () => {
+    if (!form.model.trim()) { setMsg({ kind: 'err', text: '模型名不能为空' }); return; }
+    setBusy('save'); setMsg(null);
+    try {
+      const d = await api.agentLlmSave({ base_url: form.base_url.trim(), api_key: form.api_key.trim(), model: form.model.trim() });
+      if (d.ok) { setMsg({ kind: 'ok', text: '已保存，下一条消息即使用新模型（无需重启）' }); setForm(f => ({ ...f, api_key: '' })); load(); onChanged(); }
+      else setMsg({ kind: 'err', text: d.error || '保存失败' });
+    } catch (e: any) { setMsg({ kind: 'err', text: `保存失败：${e?.message || e}（需要 platform.config 权限，找管理员）` }); }
+    setBusy('');
+  };
+
+  const cur = health?.llm;
+  return (
+    <div className="card" style={{ padding: '8px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <b style={{ fontSize: 13 }}>模型配置</b>
+        <span style={{ fontSize: 12.5, color: 'var(--text-3)' }}>
+          {cur
+            ? <>当前：<span className="mono">{cur.model || '（未设置）'}</span>{cur.base_url ? <> @ <span className="mono">{cur.base_url}</span></> : null}
+              {cur.source === 'settings' ? '（界面配置）' : cur.source === 'env' ? '（.env）' : ''}</>
+            : '正在读取…'}
+        </span>
+        <span className="spacer" style={{ flex: 1 }} />
+        <button className="btn" onClick={() => setOpen(v => !v)}>{open ? '收起' : '修改'}</button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr', gap: '6px 10px', alignItems: 'center', maxWidth: 760 }}>
+            <label>模型名 *</label>
+            <input className="ainp mono" value={form.model} placeholder="LiteLLM /v1/models 里注册的名（如 general）；Ollama 如 qwen2.5:32b"
+              onChange={e => setForm(f => ({ ...f, model: e.target.value }))} />
+            <label>API 端点</label>
+            <input className="ainp mono" value={form.base_url} placeholder="http://<litellm>:4000/v1 或 http://<ollama>:11434/v1（留空=沿用 .env）"
+              onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))} />
+            <label>API Key</label>
+            <input className="ainp mono" type="password" value={form.api_key}
+              placeholder={cfg?.api_key_masked ? `已保存 ${cfg.api_key_masked}，留空则不变` : '网关无鉴权可留空'}
+              onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))} />
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button className="btn" disabled={!!busy} onClick={test}>{busy === 'test' ? '测试中…' : '测试连接'}</button>
+            <button className="btn primary" disabled={!!busy} onClick={save}>{busy === 'save' ? '保存中…' : '保存（即生效）'}</button>
+            <span style={{ fontSize: 12.5, color: msg?.kind === 'err' ? 'var(--sev-critical)' : 'var(--sev-healthy)' }}>{msg?.text || ''}</span>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
+            配置保存在 agent 数据卷（llm_settings.json），优先于 .env，重启不丢；换 LiteLLM 模型名后这里改一下即可，不用动服务器。
+          </div>
+        </div>
+      )}
     </div>
   );
 }

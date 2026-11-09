@@ -437,6 +437,10 @@ async function proxyAgent(req, res, path) {
 app.post('/api/agent/chat', (req, res) => proxyAgent(req, res, '/chat'));
 app.post('/api/agent/reset', (req, res) => proxyAgent(req, res, '/reset'));
 app.get('/api/agent/health', (req, res) => proxyAgent(req, res, '/health'));
+// 模型配置（界面可配，agent 保存即生效）：读取回显掩码；保存/测试需 platform.config 权限
+app.get('/api/agent/llm-settings', (req, res) => proxyAgent(req, res, '/llm-settings'));
+app.post('/api/agent/llm-settings', canPlatformCfg, (req, res) => proxyAgent(req, res, '/llm-settings'));
+app.post('/api/agent/llm-test', canPlatformCfg, (req, res) => proxyAgent(req, res, '/llm-test'));
 
 // ---------- 系统管理（角色数据来自真实 userStore；审计日志=认证审计+资产审计内存尾） ----------
 app.get('/api/system', (req, res) => {
