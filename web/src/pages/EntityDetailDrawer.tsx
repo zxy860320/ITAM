@@ -189,10 +189,10 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
           {wlan && (wl || apList.length || entity.apTotal != null || entity.wlanUsers != null) ? (<>
             <Metric label="AP 总数" value={wl ? `${wl.apTotal}` : (entity.apTotal ?? '—')} />
             <Metric label="AP 正常" value={wl ? `${wl.apNormal}` : '—'} color="var(--sev-healthy)" />
-            <Metric label="AP 异常" value={wl ? `${wl.apFault}` : '—'} color={wl && wl.apFault ? 'var(--sev-critical)' : undefined} />
+            <Metric label="AP 异常" value={wl ? (wl.apFault == null ? '—' : `${wl.apFault}`) : '—'} color={wl && wl.apFault ? 'var(--sev-critical)' : undefined} />
             <Metric label="接入用户总数" value={wl?.usersTotal || entity.wlanUsers || '—'} />
             <Metric label="2.4G / 5G 用户" value={wl ? `${wl.users24 || '—'} / ${wl.users5 || '—'}` : `${entity.wlanUsers24 ?? '—'} / ${entity.wlanUsers5 ?? '—'}`} />
-            <Metric label="AP 待机(Idle)" value={wl ? `${wl.apIdle}` : '—'} small color={wl && wl.apIdle === wl.apTotal ? 'var(--text-3)' : wl && wl.apIdle ? 'var(--sev-warning)' : undefined}
+            <Metric label="AP 待机(Idle)" value={wl ? (wl.apIdle == null ? '—' : `${wl.apIdle}`) : '—'} small color={wl && wl.apIdle === wl.apTotal ? 'var(--text-3)' : wl && wl.apIdle ? 'var(--sev-warning)' : undefined}
             />
           </>) : (<>
             <Metric label="CPU" value={entity.cpu == null ? '—' : `${entity.cpu}%`} />
@@ -211,8 +211,9 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
         {wlan && (
           <div style={{ fontSize: 11, color: 'var(--text-3)', margin: '-6px 0 12px' }}>
             {wl || apList.length || entity.wlanUsers != null ? (<>
-              无线控制器（AC）视图：核心指标为 AP 与接入用户维度。AP 状态来自 Zabbix LLD 的 ap-state-name 项；
-              Idle 表示该 AP 由主机侧接管/待机（主备场景下属正常）。温度 255° 为传感器不可读哨兵值，已按异常剔除并标注。
+              无线控制器（AC）视图：核心指标为 AP 与接入用户维度。华为模板 AP 状态来自 Zabbix LLD 的 ap-state-name 项，
+              Idle 表示该 AP 由主机侧接管/待机（主备场景下属正常）；温度 255° 为传感器不可读哨兵值，已按异常剔除并标注。
+              H3C 模板 AP 汇总来自 AC 级 ap.count.online/offline/total 项（ap.state 数值项无状态名映射，按原始值展示）。
             </>) : '该控制器在 Zabbix 中未发现 AP/接入用户类无线监控项（SNMP 停采或未配置无线模板），无线指标暂无数据。'}
           </div>
         )}
@@ -356,7 +357,8 @@ export default function EntityDetailDrawer({ entity, onClose }: { entity: any; o
                       <td><span style={{
                         color: x.stateName === 'Normal' ? 'var(--sev-healthy)'
                           : x.stateName === 'Fault' ? 'var(--sev-critical)'
-                            : x.stateName === 'Idle' ? 'var(--text-3)' : 'var(--sev-warning)',
+                            : x.stateName === 'Idle' ? 'var(--text-3)'
+                              : x.stateName ? 'var(--sev-warning)' : 'var(--text-3)',
                       }}>{x.stateName || (x.state != null ? `状态${x.state}` : '—')}</span></td>
                       <td className="mono num" style={{ fontSize: 11 }}>{x.clients ?? '—'}</td>
                       <td className="mono num" style={{ fontSize: 11, color: 'var(--text-3)' }}>{(x.clients24 != null || x.clients5 != null) ? `${x.clients24 ?? '—'}/${x.clients5 ?? '—'}` : '—'}</td>

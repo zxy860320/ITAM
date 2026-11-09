@@ -254,12 +254,22 @@ function cell(key: string, r: any, domain: string) {
     case 'mem': return r.mem == null ? <span style={{ color: 'var(--text-3)' }}>—</span> : <Meter value={r.mem} />;
     case 'ap': {
       if (!r.wlan) return <span style={{ color: 'var(--text-3)' }}>—</span>;
-      const st = r.apStates || {};
-      const normal = (st.Normal || 0), idle = (st.Idle || 0);
-      const fault = (r.apTotal ?? 0) - normal - idle;
-      return <span title={`Normal=${normal}${idle ? ` Idle=${idle}(备机待机)` : ''} 异常=${fault}`}>
-        <span style={{ color: 'var(--sev-healthy)' }}>{normal}</span>/<span style={{ color: fault ? 'var(--sev-critical)' : 'var(--text-3)' }}>{fault}</span>/{r.apTotal ?? '—'}
-      </span>;
+      // 华为形态：apStates 逐 AP 计数现推；H3C 形态：后端直接给 apNormal/apFault（AC 级 ap.count.* 汇总）
+      if (r.apStates) {
+        const st = r.apStates;
+        const normal = (st.Normal || 0), idle = (st.Idle || 0);
+        const fault = (r.apTotal ?? 0) - normal - idle;
+        return <span title={`Normal=${normal}${idle ? ` Idle=${idle}(备机待机)` : ''} 异常=${fault}`}>
+          <span style={{ color: 'var(--sev-healthy)' }}>{normal}</span>/<span style={{ color: fault ? 'var(--sev-critical)' : 'var(--text-3)' }}>{fault}</span>/{r.apTotal ?? '—'}
+        </span>;
+      }
+      if (r.apNormal != null || r.apTotal != null) {
+        const online = r.apNormal ?? '—', off = r.apFault ?? '—';
+        return <span title="H3C 模板 AC 级汇总：ap.count.online / ap.count.offline / ap.count.total">
+          <span style={{ color: 'var(--sev-healthy)' }}>{online}</span>/<span style={{ color: (r.apFault || 0) ? 'var(--sev-critical)' : 'var(--text-3)' }}>{off}</span>/{r.apTotal ?? '—'}
+        </span>;
+      }
+      return <span style={{ color: 'var(--text-3)' }}>—</span>;
     }
     case 'wlanUsers': {
       if (!r.wlan) return <span style={{ color: 'var(--text-3)' }}>—</span>;

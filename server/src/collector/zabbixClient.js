@@ -32,8 +32,11 @@ const GROUP_HINTS = [
 // 模板特征：华为 "Huawei wireless Access Controller (AC)"；命名特征：wuxiankongzhiqui / wlan-ac 等
 const WLAN_TPL_RE = /wireless access controller/i;
 const WLAN_NAME_RE = /wuxian|无线|wlan[-_]?ac|ac[-_]wlan/i;
-// AC 级汇总项（列表列直接展示）：ac-users-total / ac-users-2.4 / ac-users-5；AP 状态名计数（ap-state-name-*）
-const WLAN_ITEM_KEYS = ['ac-users', 'ap-state-name'];
+// AC 级汇总项（列表列直接展示）：
+//  华为模板：ac-users-total / ac-users-2.4 / ac-users-5；AP 状态名计数（ap-state-name-*，逐 AP 文本态）
+//  H3C 模板（WX3540X，Comware 9.1）：另一套点式 key——ap.count.online/offline/total（AC 级 AP 计数）
+//  + user.online（接入用户总数，无 2.4/5 分频段拆分）；每 AP 仅有 ap.state/ap.ip/ap.mac（数值态、无 valuemap）
+const WLAN_ITEM_KEYS = ['ac-users', 'ap-state-name', 'ap.count', 'user.online'];
 
 // —— 真实指标 item key（跨模板族候选，取最新值）——
 // filter 是精确匹配，故用 search 通配 + 代码端精确/前缀过滤兜底
@@ -224,6 +227,11 @@ export class ZabbixCollector {
       else if (k === 'ac-users-total') rec.wlanUsersTotal = +v;
       else if (k === 'ac-users-2.4') rec.wlanUsers24 = +v;
       else if (k === 'ac-users-5') rec.wlanUsers5 = +v;
+      // H3C 模板 AC 级汇总：ap.count.online/offline/total + user.online（无分频段拆分，24/5 如实留 null）
+      else if (k === 'ap.count.online') rec.apCountOnline = +v;
+      else if (k === 'ap.count.offline') rec.apCountOffline = +v;
+      else if (k === 'ap.count.total') rec.apCountTotal = +v;
+      else if (k === 'user.online') rec.wlanUsersTotal = +v;
     }
 
     // 2) 全群组主机 → 三级分类
@@ -268,7 +276,12 @@ export class ZabbixCollector {
         ...(wlan ? {
           wlan: true,
           apStates: inf.apStates || null,
-          apTotal: inf.apStates ? Object.values(inf.apStates).reduce((a, b) => a + b, 0) : null,
+          // 华为：由 ap-state-name 逐 AP 计数推汇总；H3C：回退到 ap.count.* AC 级汇总（apNormal/apFault 列）
+          apTotal: inf.apStates ? Object.values(inf.apStates).reduce((a, b) => a + b, 0) : (inf.apCountTotal ?? null),
+          apNormal: inf.apStates ? (inf.apStates.Normal || 0) : (inf.apCountOnline ?? null),
+          apFault: inf.apStates
+            ? (Object.values(inf.apStates).reduce((a, b) => a + b, 0) - (inf.apStates.Normal || 0) - (inf.apStates.Idle || 0))
+            : (inf.apCountOffline ?? null),
           wlanUsers: inf.wlanUsersTotal ?? null,
           wlanUsers24: inf.wlanUsers24 ?? null,
           wlanUsers5: inf.wlanUsers5 ?? null,
@@ -417,8 +430,29 @@ export class ZabbixCollector {
     // ⚠ Zabbix search 对含字面 "]" 的值匹配失效（模板里有个 AP 名带中文+"]AP"），
     //   所以这里不用 search，直接扫该主机全量 items 按正则归组（detail 本就拉全量）。
     const APRE = /^ap-(MAC|NAME|group|model|id|state|state-name|clients|clients-2\.4GHz|clientes-5|cpu|memory|temp|eth-download|eth-upload|latitude|longitude|remote-neighbor-interface-id|remote-neighbor-system-name|2\.4GHz-channel-interference-rate|2\.4GHz-radio-noise|5GHz-channel-interference-rate|5GHz-radio-noise)-\[(.+)\]$/;
+    // H3C WX3540X 模板（Comware 9.1）点式 key：ap.state/ap.ip/ap.mac[<APID>]，value_type=3 数值态、
+    // Zabbix 侧 valuemapid=0（无状态名映射）→ 只归组不猜语义，展示层按「状态<值>」如实渲染
+    const APRE_H3C = /^ap\.(state|ip|mac)\[(.+)\]$/;
     const apMap = new Map();
+    const apNameHint = {};   // H3C：item name "AP 903f-862f-6180 状态/地址" → 展示名
+    const apSummary = {};    // H3C：AC 级汇总 ap.count.online/offline/total、user.online
     for (const it of items) {
+      const ms = APRE_H3C.exec(it.key_);
+      if (ms) {
+        let ap = apMap.get(ms[2]);
+        if (!ap) { ap = { id: ms[2], name: '', mac: '', group: '', model: '', state: null, stateName: '', clients: null, clients24: null, clients5: null, cpu: null, mem: null, temp: null, ethIn: null, ethOut: null }; apMap.set(ms[2], ap); }
+        if (ms[1] === 'state') ap.state = it.lastvalue;
+        else if (ms[1] === 'ip') ap.ipAddr = it.lastvalue;
+        else if (ms[1] === 'mac') ap.mac = it.lastvalue;
+        const nmHint = /^AP\s+(\S+)\s/.exec(it.name || '');
+        if (nmHint) apNameHint[ms[2]] = nmHint[1];
+        continue;
+      }
+      // unapproved/未采到的项 lastvalue 为空串（+'' = 0），不校验会伪造出 0——按 lastclock 过滤
+      if (it.key_ === 'ap.count.online' && Number(it.lastclock)) { apSummary.online = +it.lastvalue; continue; }
+      if (it.key_ === 'ap.count.offline' && Number(it.lastclock)) { apSummary.offline = +it.lastvalue; continue; }
+      if (it.key_ === 'ap.count.total' && Number(it.lastclock)) { apSummary.total = +it.lastvalue; continue; }
+      if (it.key_ === 'user.online' && Number(it.lastclock)) { apSummary.usersOnline = +it.lastvalue; continue; }
       const m = APRE.exec(it.key_);
       if (!m) continue;
       let ap = apMap.get(m[2]);
@@ -443,16 +477,16 @@ export class ZabbixCollector {
     }
     const apList = [...apMap.values()]
       .map(x => {
-        // 名称回退链：ap-name 常空 → 从实例标识提取（"办公间-面封AP 68.xx.xx" 或纯 MAC 形态）
+        // 名称回退链：ap-name 常空 → H3C name 提示（"AP xxx 状态"）→ 从实例标识提取（"办公间-面封AP 68.xx.xx" 或纯 MAC 形态）
         const idName = x.id.replace(/-\d{1,3}(\.\d{1,3}){3}\.\d+(\.\d+)?$/, '').replace(/\s+[\w.-]*AP\s*$/i, '').trim();
-        x.label = x.name || idName || x.mac || x.id;
+        x.label = x.name || apNameHint[x.id] || idName || x.mac || x.id;
         // 温度 255=传感器不可读哨兵值（华为 AP 常见），如实置 null
         if (x.temp === 255) x.temp = null;
         // 华为备机侧状态文本 "IdleIdle" 变体（双射频拼接），归并到 Idle
         if (x.stateName === 'IdleIdle') x.stateName = 'Idle';
-        // 实例标识里常带 AP 管理 IP（尾段 x.x.x.x.NN.NN）
+        // IP：华为形态实例标识尾段常带 AP 管理 IP（x.x.x.x.NN.NN）；H3C 形态取 ap.ip[APID] 独立项
         const ipm = x.id.match(/(\d{1,3}(?:\.\d{1,3}){3})\.\d+(?:\.\d+)?$/);
-        x.ip = ipm ? ipm[1] : '';
+        x.ip = (ipm && ipm[1]) || x.ipAddr || '';
         return x;
       })
       .sort((a, b) => (a.stateName === 'Normal' ? 0 : 1) - (b.stateName === 'Normal' ? 0 : 1) || a.label.localeCompare(b.label, 'en', { numeric: true }));
@@ -498,12 +532,17 @@ export class ZabbixCollector {
       profile,
       netIfs,
       apList,
-      wlanSummary: apList.length ? {
-        apTotal: apList.length,
-        apNormal: apList.filter(x => x.stateName === 'Normal').length,
-        apFault: apList.filter(x => x.stateName && x.stateName !== 'Normal' && x.stateName !== 'Idle').length,
-        apIdle: apList.filter(x => x.stateName === 'Idle').length,
-        usersTotal: byKey['ac-users-total']?.[0]?.lastvalue || '',
+      // wlanSummary：华为形态由 AP 列表逐台推；H3C 形态 ap.state 数值无 valuemap（不猜语义），
+      // AP 汇总优先用 AC 级 ap.count.*（与列表同源），用户数用 user.online（无分频段，24/5 留空）
+      wlanSummary: (apList.length || apSummary.total != null) ? {
+        apTotal: apSummary.total != null ? apSummary.total : apList.length,
+        apNormal: apSummary.online != null ? apSummary.online : apList.filter(x => x.stateName === 'Normal').length,
+        // H3C：offline 项若被 Zabbix 禁用（state=1 拉不到）→ 如实 null，不用空集推断 0
+        apFault: apSummary.total != null ? (apSummary.offline ?? null)
+          : apList.filter(x => x.stateName && x.stateName !== 'Normal' && x.stateName !== 'Idle').length,
+        apIdle: apSummary.online != null ? null : apList.filter(x => x.stateName === 'Idle').length,
+        usersTotal: byKey['ac-users-total']?.[0]?.lastvalue
+          ?? (Number.isFinite(apSummary.usersOnline) ? String(apSummary.usersOnline) : ''),
         users24: byKey['ac-users-2.4']?.[0]?.lastvalue || '',
         users5: byKey['ac-users-5']?.[0]?.lastvalue || '',
       } : null,
@@ -544,7 +583,7 @@ export class ZabbixCollector {
     const searchKeys = ['system.cpu.util', 'hwCPUUsage', 'hrProcessorLoad', 'hwEntityCPUUtilization',
       'vm.memory.util', 'hrMemoryLoad', 'vm.memory.size', 'icmppingsec', 'sensor.temp.value',
       'system.cpu.load', 'proc.num', 'vfs.fs', 'net.if.in', 'net.if.out',
-      'vfs.dev.read.rate', 'vfs.dev.write.rate', 'ac-users'];
+      'vfs.dev.read.rate', 'vfs.dev.write.rate', 'ac-users', 'user.online'];
     const num = k => k.split('[')[0];
     const items = await this.rpc('item.get', {
       output: ['itemid', 'key_', 'name', 'lastclock', 'lastvalue', 'value_type', 'history', 'trends', 'units'],
@@ -651,7 +690,8 @@ export class ZabbixCollector {
     //  AC 级：ac-users-total/2.4/5（search 已带）；AP 级：按 ap 参数（LLD 实例标识）取该 AP 的
     //  clients/上下行流量/CPU/内存。AP key 方括号含点号等，用不带括号的指标前缀 search 再代码端精确匹配。
     const apUsers = {
-      total: pick(['ac-users-total']), u24: pick(['ac-users-2.4']), u5: pick(['ac-users-5']),
+      // 华为 ac-users-total / H3C user.online（AC 级接入用户总数时序）
+      total: pick(['ac-users-total', 'user.online']), u24: pick(['ac-users-2.4']), u5: pick(['ac-users-5']),
     };
     let apItems = [];
     if (ap) {
